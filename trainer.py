@@ -369,9 +369,6 @@ class GANTrainingEnv(TrainingEnv):
         if self.params.discrim_loss_clamp:
             adv_loss = torch.clamp(adv_loss, min=None, max=loss_item)
         return adv_loss
-    def should_inherit_discrim(self):
-        discrim_inherit = self.params.discrim_inherit
-        return discrim_inherit and isinstance(discrim_inherit, list | tuple) and len(discrim_inherit) == 2
     def get_dataloader(self):
         # batch_sampler option is mutually exclusive with batch_size, shuffle, sampler, and drop_last
         if not self.params.efficient_multi_res or not self.params.rand_downscale_options:
@@ -481,7 +478,8 @@ class ModelTrainer(ParamManager):
             "load_optim": True,
             "diversity_loss_func": None,
             "show_true_loss": False,
-            "data_parallel": False
+            "data_parallel": False,
+            "weight_inherit": False
         }
         for param in default_params:
             if param in self.params:
@@ -560,6 +558,10 @@ class ModelTrainer(ParamManager):
     def full_name(self):
         prefix = "" if not self._env else self._env.params.name
         return f"{prefix}{'-' if prefix and self.name else ''}{self.name}"
+    
+    def should_inherit_weights(self):
+        weight_inherit = self.params.weight_inherit
+        return weight_inherit and isinstance(weight_inherit, list | tuple) and len(weight_inherit) == 2
 
     def load_optimizer(self, save_folder=None):
         learn_rate = self.params.learn_rate
@@ -576,7 +578,7 @@ class ModelTrainer(ParamManager):
         weights_dir = (
             self.env.weights_dir if save_folder is None else f"{save_folder}/weights"
         ).rstrip('/')
-        if self.params.load_optim:
+        if self.params.load_optim and not (self.should_inherit_weights() or self.params.weight_inherit == -1):
             try:
                 optim_state = torch.load(
                     f'{weights_dir}/{resume_from}_{self.full_name()}_optim.torch',
@@ -604,17 +606,23 @@ class ModelTrainer(ParamManager):
         weights_dir = (
             self.env.weights_dir if save_folder is None else f"{save_folder}/weights"
         ).rstrip('/')
-        if resume_from:
+        state_dict = None
+        if self.should_inherit_weights():
+            model_name, epoch = self.params.weight_inherit
+            parent_folder, _ = os.path.split(self.get_env_param("save_folder"))
+            state_dict = torch.load(f'{parent_folder}/{model_name}/weights/{epoch}_{model_name}.torch', map_location='cpu')
+        elif resume_from and self.params.weight_inherit != -1:
             try:
                 state_dict = torch.load(
                     f'{weights_dir}/{resume_from}_{self.full_name()}.torch',
                     map_location='cpu'
                 )
-                model.load_state_dict(state_dict, strict=self.params.strict_loading)
-                del state_dict
             except Exception as e:
                 self.log(f"Could not load from epoch {resume_from}")
                 raise e
+        if state_dict:
+            model.load_state_dict(state_dict, strict=self.params.strict_loading)
+            del state_dict
 
         return model.to(device=self.device, dtype=self.params.dtype)
 
