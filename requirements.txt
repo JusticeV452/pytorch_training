@@ -2,6 +2,7 @@ jsbeautifier
 multiprocess==0.70.18
 numpy==2.2.3
 opencv_python==4.11.0.86
+pydantic
 torch==2.7.1
 torch_fidelity==0.3.0
 torchmetrics==1.7.4

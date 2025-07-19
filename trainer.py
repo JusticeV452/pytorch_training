@@ -11,12 +11,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 
+from datetime import datetime
+from pydantic import Field
+from typing import Optional, List, Any, Callable, Type
 from torch.utils.data import DataLoader
 from torch.utils.data.dataloader import RandomSampler
-from datetime import datetime
 
 from components.gradient_accumulation import BatchNormAccumulator
 from components.loss_manager import LossManager
+from components.param_manager import ParamManager
 from image_utils import tensor_to_img, write_rgb
 from loss.diversity import DIVERSITY_FUNCS, FeatureDiversityLoss, DummyFDL, compute_kid, compute_fid
 from pruning import FineGrainedPruner, DummyPruner
@@ -35,31 +38,10 @@ if use_multiprocess:
 else:
     new_multiprocess_ctx = None
 
-def raise_key_error(key):
-    raise KeyError(key)
-    
-class AttrDict(dict):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._default = lambda _: None
-    def set_default(self, default):
-        self._default = default
-    def __getattr__(self, attr):
-        if attr not in self:
-            return self._default(attr)
-        return self[attr]
-    
+
 class ParamEncoder(json.JSONEncoder):
     def default(self, o):
         return repr(o)
-
-class ParamManager:
-    def __init__(self, **kwargs):
-        self.params = AttrDict(**kwargs)
-        self.params.set_default(raise_key_error)
-        self.set_default_params()
-    def set_default_params(self):
-        return
 
 def mixup_data(real, fake, alpha=0.4):
     """Applies MixUp to real and fake images"""
@@ -104,36 +86,29 @@ class DataParallel(nn.DataParallel):
             return getattr(self.model, attr)
 
 class TrainingEnv(ParamManager):
-    def set_default_params(self):
-        default_params = {
-            "name": None,
-            "update_rate": 10,
-            "save_rate": 50,
-            "resume_from": 0,
-            "use_amp": False,
-            "empty_cache_post_step": False,
-            "empty_cache_pre_step": False,
-            "watch_loss_funcs": None,
-            "drop_last": False,
-            "num_workers": 0,
-            "save_folder": "",
-            "init_save": False,
-            "empty_cache_post_epoch": False,
-            "empty_cache_post_batch": False,
-            "reset_rng": None,
-            "save_manager": None,
-            "external_updater": None,
-            "show_batch_progress": True,
-            "show_num_unique": False,
-            "rand_downscale_options": [],
-            "no_downscale_batch_div": 4,
-            "efficient_multi_res": True
-        }
-        for param in default_params:
-            if param in self.params:
-                continue
-            self.params[param] = default_params[param]
-        super().set_default_params()
+    name: Optional[str] = Field(None, description="Optional name for the training run")
+    trainer_init_args: List[ModelTrainer | dict] = Field(default_factory=list, description="Trainer init config list")
+    update_rate: int = Field(10, description="Frequency of updates")
+    save_rate: int = Field(50, description="Frequency of saves")
+    resume_from: int = Field(0, description="Epoch or step to resume from")
+    use_amp: bool = Field(False, description="Use automatic mixed precision")
+    empty_cache_post_step: bool = Field(False, description="Empty cache after each step")
+    empty_cache_pre_step: bool = Field(False, description="Empty cache before each step")
+    watch_loss_funcs: Optional[Any] = Field(None, description="Loss functions to watch")
+    drop_last: bool = Field(False, description="Drop last incomplete batch")
+    num_workers: int = Field(0, description="Number of worker processes for data loading")
+    save_folder: str = Field("", description="Folder path to save checkpoints")
+    init_save: bool = Field(False, description="Save model state at initialization")
+    empty_cache_post_epoch: bool = Field(False, description="Empty cache after each epoch")
+    empty_cache_post_batch: bool = Field(False, description="Empty cache after each batch")
+    reset_rng: Optional[Any] = Field(None, description="RNG reset configuration")
+    save_manager: Optional[Any] = Field(None, description="Manager for save operations")
+    external_updater: Optional[Any] = Field(None, description="External updater object")
+    show_batch_progress: bool = Field(True, description="Show progress bar for batches")
+    show_num_unique: bool = Field(False, description="Show number of unique items in batches")
+    rand_downscale_options: List[Any] = Field(default_factory=list, description="Random downscale options")
+    no_downscale_batch_div: int = Field(4, description="Batch division factor for no downscale")
+    efficient_multi_res: bool = Field(True, description="Use efficient multi-resolution strategy")
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -147,12 +122,10 @@ class TrainingEnv(ParamManager):
         self.dataset = self.params.dataset_type(**self.params.dataset_kwargs,)
         print("dataset finished.")
         self.trainers = []
-        for i, trainer_kwargs in enumerate(self.params.trainer_kwargs_list):
+        for i, trainer_kwargs in enumerate(self.params.trainer_init_args):
             assert trainer_kwargs
             if isinstance(trainer_kwargs, ModelTrainer):
-                self.params.trainer_kwargs_list[i] = trainer_kwargs.params
-                trainer = trainer_kwargs
-                trainer.set_env(self)
+                trainer_kwargs.set_env(self)
             else:
                 trainer_type = ModelTrainer
                 if "trainer_type" in trainer_kwargs:
@@ -300,7 +273,7 @@ class TrainingEnv(ParamManager):
         watch_loss_funcs = self.params.watch_loss_funcs
 
         for trainer in self.trainers:
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp):
                 loss, pred, expected, to_plot, *_, = trainer.calc_loss(
                     trainer.preprocess(images)
                 )
@@ -319,7 +292,7 @@ class TrainingEnv(ParamManager):
         with torch.no_grad():
             for trainer in self.trainers:
                 trainer.eval()
-                with torch.cuda.amp.autocast(enabled=use_amp):
+                with torch.amp.autocast("cuda", enabled=use_amp):
                     loss, pred, expected, *_, = trainer.calc_loss(images)
                     for func_name, watch_loss_func in watch_loss_funcs.items():
                         watching[func_name] = (watch_loss_func(pred, expected)[0] / self.norm_div)
@@ -341,19 +314,13 @@ class TrainingEnv(ParamManager):
 
 
 class GANTrainingEnv(TrainingEnv):
-    def set_default_params(self):
-        default_params = {
-            "gan_loss_scale": 1,
-            "discrim_inherit": None,
-            "discrim_loss_clamp": False,
-        }
-        for param in default_params:
-            if param in self.params:
-                continue
-            self.params[param] = default_params[param]
-        super().set_default_params()
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    gan_loss_scale: int = Field(1, description="Mulitplier for discrim loss when passed to generator")
+    adv_loss_clamp: Optional[int | float] = Field(
+        None, description="Set max value of adversarial loss to loss from primary loss function"
+    )
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         assert len(self.trainers) >= 2
         self.gen = self.trainers[0]
         self.discrim = self.trainers[1]
@@ -366,7 +333,7 @@ class GANTrainingEnv(TrainingEnv):
         loss_item = loss.item()
         gan_loss_scale = self.discrim_loss_scale(overall_epoch, loss=loss_item)
         adv_loss = (discrim_loss.to(self.gen.device) * gan_loss_scale)
-        if self.params.discrim_loss_clamp:
+        if self.params.adv_loss_clamp:
             adv_loss = torch.clamp(adv_loss, min=None, max=loss_item)
         return adv_loss
     def get_dataloader(self):
@@ -391,7 +358,7 @@ class GANTrainingEnv(TrainingEnv):
         use_amp = self.params.use_amp
         watch_loss_funcs = self.params.watch_loss_funcs
         
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.amp.autocast("cuda", enabled=use_amp):
             loss, pred, expected, to_plot, *inference_intermediates = self.gen.calc_loss(
                 self.gen.preprocess(images)
             )
@@ -409,7 +376,7 @@ class GANTrainingEnv(TrainingEnv):
             gc.collect()
             torch.cuda.empty_cache()
         
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.amp.autocast("cuda", enabled=use_amp):
             self.discrim.eval()
             discrim_loss = self.discrim.calc_loss(real, fake, calc_metrics=True)
             loss -= self.calc_adv_loss(overall_epoch, loss, discrim_loss)
@@ -426,7 +393,7 @@ class GANTrainingEnv(TrainingEnv):
         watching = {}
         with torch.no_grad():
             self.gen.eval()
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp):
                 # Discrim loss
                 discrim_loss = discrim_loss.detach()
                 discrim_loss_mod = self.discrim.calc_loss_modifier()
@@ -456,51 +423,70 @@ class GANTrainingEnv(TrainingEnv):
         return loss_dict
 
     
-class ModelTrainer(ParamManager):
     def set_default_params(self):
         default_params = {
-            "name": None,
-            "learn_rate": 1e-3,
-            "device": "cuda",
-            "optim_type": torch.optim.Adam,
-            "use_checkpointing": False,
-            "grad_acc_size": 1,
-            "dtype": torch.float32,
-            "reg_func": lambda model: 0,
-            "sparsity": 0,
-            "sparsity_dict": None,
-            "scheduler": None,
-            "gpu_id": 0,
-            "trainable_loss": False,
-            "strict_loading": True,
-            "new_save_format": True,
-            "batch_norm_acc": False,
-            "load_optim": True,
-            "diversity_loss_func": None,
-            "show_true_loss": False,
-            "data_parallel": False,
-            "weight_inherit": False
         }
         for param in default_params:
             if param in self.params:
                 continue
             self.params[param] = default_params[param]
         super().set_default_params()
+class ModelTrainer(ParamManager):
+    name: Optional[str] = Field(None, description="Optional name for the trainer")
+    model_type: Type[torch.nn.Module] = Field(..., description="Model Class")
+    model_kwargs: Optional[dict] = Field(None, description="Model kwargs")
+    learn_rate: float = Field(1e-3, description="Learning rate for optimizer")
+    resume_from: Optional[int] = Field(None, description="Epoch to resume from")
+    device_str: str = Field("cuda", description="Device to run training on ('cpu' or 'cuda')")
+    optim_type: Type[torch.optim.Optimizer] = Field(
+        torch.optim.Adam,
+        description="Optimizer class to use"
+    )
+    use_checkpointing: bool = Field(False, description="Enable checkpointing")
+    grad_acc_size: int = Field(1, description="Gradient accumulation steps")
+    dtype: torch.dtype = Field(torch.float32, description="Data type for tensors")
+    loss_func: Callable = Field(..., description="Loss function")
+    reg_func: Callable[[torch.nn.Module], float] = Field(
+        default=lambda model: 0,
+        description="Regularization function"
+    )
+    sparsity: float = Field(0.0, description="Sparsity level")
+    sparsity_dict: Optional[dict] = Field(
+        None,
+        description="Optional sparsity configuration dictionary"
+    )
+    scheduler_maker: Optional[Callable[[torch.optim.Optimizer]]] = Field(
+        None,
+        description="Learning rate scheduler (optional)"
+    )
+    gpu_id: int = Field(0, description="GPU ID to use")
+    trainable_loss: bool = Field(False, description="Whether loss is trainable")
+    strict_loading: bool = Field(True, description="Strict loading of state dicts")
+    new_save_format: bool = Field(True, description="Use new save format for models")
+    batch_norm_acc: bool = Field(False, description="Enable batch norm accumulation")
+    load_optim: bool = Field(True, description="Load optimizer state from checkpoint")
+    diversity_loss_func: Optional[Callable] = Field(
+        None,
+        description="Optional diversity loss function"
+    )
+    show_true_loss: bool = Field(False, description="Show true loss during training")
+    data_parallel: bool = Field(False, description="Use torch.nn.DataParallel")
+    weight_inherit: bool = Field(False, description="Inherit weights from checkpoint")
+    disable_logging: bool = Field(False, description="Disable logging", exclude=True)
+
     def __init__(self, env=None, **kwargs):
         super().__init__(**kwargs)
         self._env = None
         self.set_env(env)
         self.batch_state = {}
-        self.name = self.params.name
-        self.dtype = self.params.dtype
         self.device = torch.device(
-            self.params.device if ("cuda" in self.params.device and torch.cuda.is_available())
+            self.params.device_str if ("cuda" in self.params.device_str and torch.cuda.is_available())
             else "cpu"
         )
         self.log("loading model...")
         self.model = self.load_model(self.params.model_type, self.params.model_kwargs)
-        gc.collect()
-        torch.cuda.empty_cache()
+        # gc.collect()
+        # torch.cuda.empty_cache()
         
         sparsity = self.params.sparsity
         sparsity_dict = self.params.sparsity_dict
@@ -511,10 +497,8 @@ class ModelTrainer(ParamManager):
             self.load_loss_weights()
         self.log("loading optimizer...")
         self.optimizer = self.load_optimizer()
-        self.scheduler = None
-        if self.params.scheduler:
-            self.scheduler = self.params.scheduler(self.optimizer)
         self.log("optimizer loading finished.")
+        self.scheduler = self.params.scheduler_maker(self.optimizer) if self.params.scheduler_maker else None
         self.log(f"Model size: {calc_model_size(self.model)},  Num parameters: {count_parameters(self.model)}")
 
         self.bn_accumulator = None
@@ -566,7 +550,7 @@ class ModelTrainer(ParamManager):
     def load_optimizer(self, save_folder=None):
         learn_rate = self.params.learn_rate
         optim_type = self.params.optim_type
-        resume_from = self.params.resume_from
+        resume_from = self.get("resume_from", self.get_env_param("resume_from"))
         optim_params = self.model.parameters()
         if self.params.trainable_loss:
             optim_params = list(optim_params) + list(self.params.loss_func.parameters())
@@ -588,6 +572,7 @@ class ModelTrainer(ParamManager):
                 for g in optimizer.param_groups:
                     if learn_rate is not None:
                         g['lr'] = learn_rate
+                del optim_state
             except FileNotFoundError:
                 self.log("optimizer loading failed, using new optimizers.")
         else:
@@ -597,7 +582,7 @@ class ModelTrainer(ParamManager):
         return optimizer
         
     def load_model(self, model_type, model_kwargs, save_folder=None):
-        resume_from = self.params.resume_from
+        resume_from = self.get("resume_from", self.get_env_param("resume_from"))
         model = model_type if model_kwargs is None else model_type(
             **model_kwargs, device=self.device
         )
@@ -610,12 +595,15 @@ class ModelTrainer(ParamManager):
         if self.should_inherit_weights():
             model_name, epoch = self.params.weight_inherit
             parent_folder, _ = os.path.split(self.get_env_param("save_folder"))
-            state_dict = torch.load(f'{parent_folder}/{model_name}/weights/{epoch}_{model_name}.torch', map_location='cpu')
+            state_dict = torch.load(
+                f"{parent_folder}/{model_name}/weights/{epoch}_{model_name}.torch",
+                map_location="cpu"
+            )
         elif resume_from and self.params.weight_inherit != -1:
             try:
                 state_dict = torch.load(
-                    f'{weights_dir}/{resume_from}_{self.full_name()}.torch',
-                    map_location='cpu'
+                    f"{weights_dir}/{resume_from}_{self.full_name()}.torch",
+                    map_location="cpu"
                 )
             except Exception as e:
                 self.log(f"Could not load from epoch {resume_from}")
@@ -627,7 +615,7 @@ class ModelTrainer(ParamManager):
         return model.to(device=self.device, dtype=self.params.dtype)
 
     def load_loss_weights(self, save_folder=None):
-        resume_from = self.params.resume_from
+        resume_from = self.get("resume_from", self.get_env_param("resume_from"))
         if not self.params.resume_from:
             return
         weights_dir = (
@@ -691,17 +679,23 @@ class ModelTrainer(ParamManager):
                 f"{base_path}_loss.torch",
                 _use_new_zipfile_serialization=self.params.new_save_format
             )
+
     def eval(self):
         return self.model.eval()
+
     def train(self):
         return self.model.train()
+
     def prune(self):
         return self.pruner.prune(self.model)
+
     def zero_grad(self):
         return self.optimizer.zero_grad()
+
     def scheduler_step(self):
         if self.scheduler:
             self.scheduler.step()
+
     def acc_loss(self, pred, expected, loss_tracker, loss_func=None, always_acc_indivs=False):
         loss_func = self.params.loss_func if loss_func is None else loss_func
         loss_part, indivs_part = loss_func(pred, expected)
@@ -711,32 +705,40 @@ class ModelTrainer(ParamManager):
                 loss_tracker[1].setdefault(loss_name, 0)
                 loss_tracker[1][loss_name] += val
         return loss_tracker
+
     def get_images_idx(self, images, idx, slice_len=1):
         num_classes = self.model.num_classes
         if idx < 0:
             idx += images.shape[1] // num_classes
         return images[:, idx * num_classes:(idx + slice_len) * num_classes]
+
     def channel_unpack(self, images):
         num_classes = self.model.num_classes
         num_images = images.shape[1] // num_classes
         return [images[:, i * num_classes:(i + 1) * num_classes] for i in range(num_images)]
+
     def preprocess(self, inp):
         return inp
+
     def on_batch_end(self):
         self.batch_state = {}
+
     def on_epoch_end(self):
         self.scheduler_step()
+
     def on_training_end(self):
         if self.bn_accumulator:
             self.bn_accumulator.remove_hooks()
         self.diversity_loss_man.remove_hooks()
         self.model.eval()
         self.model.requires_grad_(False)
+
     @property
     def last_loss_components(self):
         if StateKeys.LOSS_COMPS not in self.batch_state:
             self.batch_state[StateKeys.LOSS_COMPS] = {}
         return self.batch_state[StateKeys.LOSS_COMPS]
+
     def calc_loss_modifier(self):
         reg_loss = self.params.reg_func(self.model)
         diversity_loss = self.diversity_loss_man.get_loss()
@@ -745,13 +747,16 @@ class ModelTrainer(ParamManager):
             "diversity_loss": diversity_loss
         })
         return reg_loss + diversity_loss
+
     def _calc_loss(self, inp, ex):
         return self.call_loss_func(self.model(inp), ex)
+
     def calc_loss(self, *args, **kwargs):
         loss = self._calc_loss(*args, **kwargs)
         if not self.model.training:
             self.batch_state[StateKeys.LOSS] = loss
         return loss
+
     def get_progress_report(self):
         loss = self.batch_state[StateKeys.LOSS]
         label_prefix = self.name + "{}" if self.name else ""
@@ -770,17 +775,22 @@ class ModelTrainer(ParamManager):
         if self.params.show_true_loss:
             to_print += f" {label_prefix.format(' ')}Loss: {np.format_float_scientific(loss, precision=3)}"
         return to_print, renamed_loss_cmps
+
     def calc_metrics(self):
         return {}
+
     def get_noise(self, inp, rand_mag=.064):
         return torch.rand(inp.shape, device=self.device, dtype=self.dtype) * rand_mag - (rand_mag / 2)
+
     def add_noise(self, inp, rand_mag=.064):
         return torch.clamp(inp + self.get_noise(inp, rand_mag=rand_mag), 0, 1)
+
     def do_optimizer_step(self, idx, grad_acc_size):
         return (
             (0 < grad_acc_size < 1 and idx == round(len(self.env.dataloader) * grad_acc_size))
             or (grad_acc_size >= 1 and (idx + 1) % grad_acc_size == 0)
         )
+
     def loss_step(self, idx, loss):
         self.scaler.scale(loss).backward(retain_graph=False)
         did_step = self.do_optimizer_step(idx, self.params.grad_acc_size)
@@ -791,6 +801,7 @@ class ModelTrainer(ParamManager):
             self.diversity_loss_man.reset_loss()
         self.prune()
         return did_step
+
     def update_loss_components(self, loss_name, loss_val=None):
         if self.model.training:
             return
@@ -799,11 +810,13 @@ class ModelTrainer(ParamManager):
             self.last_loss_components.update(loss_name)
             return
         self.last_loss_components[loss_name] = loss_val
+
     def call_loss_func(self, *args, **kwargs):
         result = self.params.loss_func(*args, **kwargs)
         if len(result) >= 2 and not self.model.training:
             self.update_loss_components(result[1])
         return result[0]
+
     def status_update(self, images, expected, pred, epoch, batch_num=None):
         size = images.shape[-2:]
         name = self.env.params.name
