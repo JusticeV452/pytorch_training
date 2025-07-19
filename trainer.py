@@ -423,14 +423,6 @@ class GANTrainingEnv(TrainingEnv):
         return loss_dict
 
     
-    def set_default_params(self):
-        default_params = {
-        }
-        for param in default_params:
-            if param in self.params:
-                continue
-            self.params[param] = default_params[param]
-        super().set_default_params()
 class ModelTrainer(ParamManager):
     name: Optional[str] = Field(None, description="Optional name for the trainer")
     model_type: Type[torch.nn.Module] = Field(..., description="Model Class")
