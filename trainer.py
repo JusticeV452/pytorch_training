@@ -43,6 +43,7 @@ class ParamEncoder(json.JSONEncoder):
     def default(self, o):
         return repr(o)
 
+
 def mixup_data(real, fake, alpha=0.4):
     """Applies MixUp to real and fake images"""
     batch_size = real.size(0)
@@ -51,6 +52,7 @@ def mixup_data(real, fake, alpha=0.4):
     mixed = lam * real + (1 - lam) * fake
     return mixed, lam
 
+
 def mixup_bce(pred, lam):
     real_labels = torch.ones(pred.shape[0], 1, device=pred.device, dtype=pred.dtype)
     fake_labels = torch.zeros(pred.shape[0], 1, device=pred.device, dtype=pred.dtype)
@@ -58,8 +60,10 @@ def mixup_bce(pred, lam):
     fake_loss = (1 - lam) * F.binary_cross_entropy(pred, fake_labels, reduction='none')
     return (real_loss + fake_loss).mean()
 
+
 def not_none(obj):
     return type(obj) is not type(None)
+
 
 def loss_dict_to_cpu(loss_dict):
     on_gpu = {}
@@ -74,9 +78,11 @@ def loss_dict_to_cpu(loss_dict):
         for key in loss_dict
     }
 
+
 class StateKeys:
     LOSS = "__LOSS__"
     LOSS_COMPS = "__LOSS_COMPS__"
+
 
 class DataParallel(nn.DataParallel):
     def __getattr__(self, attr):
@@ -84,6 +90,7 @@ class DataParallel(nn.DataParallel):
             return super().__getattr__(attr)
         except AttributeError:
             return getattr(self.model, attr)
+
 
 class TrainingEnv(ParamManager):
     name: Optional[str] = Field(None, description="Optional name for the training run")
@@ -833,5 +840,111 @@ class ModelTrainer(ParamManager):
         del comp_img
         gc.collect()
         torch.cuda.empty_cache()
+
+
+class DiscrimTrainer(ModelTrainer):
+    display_confidence: bool = Field(True, description="Whether to display model confidence")
+    label_flip_prob: float = Field(0.0, description="Probability of flipping labels (for data augmentation)")
+    positive_label: int = Field(1, description="Label value for positive class")
+    negative_label: int = Field(0, description="Label value for negative class")
+    add_noise: bool = Field(False, description="Whether to add noise to inputs")
+    mixup_alpha: Optional[float] = Field(0.4, description="Alpha parameter for mixup augmentation")
+    mixup_samples: Optional[float] = Field(None, description="Ratio of images to use for mixup loss")
+    mixup_loss_ratio: Optional[float] = Field(None, description="Loss weighting for mixup")
+    show_KID: bool = Field(False, description="Show Kernel Inception Distance (KID) metric")
+    show_FID: bool = Field(False, description="Show Frechet Inception Distance (FID) metric")
+    fm_loss_mult: float = Field(0.0, description="Weight multiplier for feature matching loss")
+
+    def get_progress_report(self):
+        loss_cmps = self.last_loss_components
+        label_prefix = self.name + "{}" if self.name else ""
+        to_print, renamed_cmps = super().get_progress_report()
+
+        confusion_metrics = ["TP", "TN", "FP", "FN"]
+        acc_key = label_prefix.format('_') + "Acc"
+        if not acc_key in renamed_cmps and all(metric in loss_cmps for metric in confusion_metrics):
+            total = sum(loss_cmps[metric] for metric in confusion_metrics)
+            renamed_cmps[acc_key] = 100 * (loss_cmps["TP"] + loss_cmps["TN"]) / total
+        to_print += f" {label_prefix.format(' ')}Acc: {round(renamed_cmps.get(acc_key), 2)}%"
+
+        conf_key = label_prefix.format('_') + "Conf"
+        confidence = loss_cmps.get('Conf')
+        renamed_cmps[conf_key] = confidence
+        if "Conf" in loss_cmps and self.params.display_confidence:
+            to_print += f" {label_prefix.format(' ')}Conf: {round(confidence, 2)}%"
+        renamed_cmps[label_prefix.format('_') + "KID"] = loss_cmps.get('KID', -1)
+        if self.params.show_KID:
+            to_print += f" KID {np.format_float_scientific(loss_cmps.get('KID', -1), precision=3)}"
+        renamed_cmps[label_prefix.format('_') + "FID"] = loss_cmps.get('FID', -1)
+        if self.params.show_FID:
+            to_print += f" FID {loss_cmps.get('FID', -1)}"
+        return to_print, renamed_cmps
+    def _calc_loss(self, images, recon_x, calc_metrics=False):
+        device = self.device
+        dtype = self.dtype
+        images = images.to(device, dtype)
+        recon_x = recon_x.to(device, dtype)
+        real_ex = self.params.positive_label * torch.ones(
+            images.shape[0], 1, device=device, dtype=dtype
+        )
+        fake_ex = torch.zeros(recon_x.shape[0], 1, device=device, dtype=dtype)
+        if self.params.label_flip_prob:
+            # Recommended 0.05
+            flip_prob = self.params.label_flip_prob
+            mask = flip_prob < torch.rand(images.shape[0], 1, device=device, dtype=dtype)
+            real_ex *= mask
+            real_ex += self.params.negative_label * ~mask
+            fake_ex = self.params.positive_label * (fake_ex + ~mask) + self.params.negative_label * mask
+        else:
+            fake_ex += self.params.negative_label
+        pred, enc = self.model(torch.cat([images, recon_x]))
+        loss = self.call_loss_func(
+            pred,
+            torch.cat([real_ex, fake_ex]),
+            calc_metrics=calc_metrics
+        )
+        if isinstance(self.params.mixup_alpha, int | float) and self.params.mixup_samples:
+            num_mixup_samples = int(len(images) * self.params.mixup_samples)
+            mixup_samples, lam = mixup_data(
+                images[:num_mixup_samples], recon_x[:num_mixup_samples],
+                self.params.mixup_alpha
+            )
+            mixup_loss = mixup_bce(self.model.classify(mixup_samples), lam)
+            self.update_loss_components("mixup_loss", mixup_loss)
+            if (
+                isinstance(self.params.mixup_loss_ratio, int | float)
+                and 0 <= self.params.mixup_loss_ratio <= 1
+            ):
+                loss *= (1 - self.params.mixup_loss_ratio) * loss
+                mixup_loss *= self.params.mixup_loss_ratio
+            loss += mixup_loss
+        self.batch_state.update({"enc": enc})
+        if calc_metrics:
+            self.update_loss_components(self.calc_metrics(images, recon_x))
+        return loss
+    def calc_loss_modifier(self):
+        loss_mod = super().calc_loss_modifier()
+        if self.params.fm_loss_mult:
+            # Feature Matching Loss
+            enc = self.batch_state.get("enc")
+            fm_loss = self.params.fm_loss_mult * torch.nn.functional.mse_loss(
+                enc[:len(enc) // 2], enc[len(enc) // 2:]
+            )
+            loss_mod -= fm_loss
+            self.update_loss_components("fm_loss", fm_loss)
+        return loss_mod
+    @torch.no_grad()
+    def calc_metrics(self, real, fake):
+        metrics = {}
+        if self.params.show_KID:
+            metrics["KID"] = compute_kid(real, fake)
+        if self.params.show_FID:
+            metrics["FID"] = compute_fid(real, fake)
+        return metrics
+    def preprocess(self, images, pred, *_args):
+        real = discrim_real = images
+        fake = pred
+        discrim_fake = fake.detach()
+        return real, fake, discrim_real, discrim_fake
 
 
