@@ -92,6 +92,420 @@ class DataParallel(nn.DataParallel):
             return getattr(self.model, attr)
 
 
+class ModelTrainer(ParamManager):
+    name: Optional[str] = Field(None, description="Optional name for the trainer")
+    model_type: Type[torch.nn.Module] = Field(..., description="Model Class")
+    model_kwargs: Optional[dict] = Field(None, description="Model kwargs")
+    learn_rate: float = Field(1e-3, description="Learning rate for optimizer")
+    resume_from: Optional[int] = Field(None, description="Epoch to resume from")
+    device_str: str = Field("cuda", description="Device to run training on ('cpu' or 'cuda')")
+    optim_type: Type[torch.optim.Optimizer] = Field(
+        torch.optim.Adam,
+        description="Optimizer class to use"
+    )
+    use_checkpointing: bool = Field(False, description="Enable checkpointing")
+    grad_acc_size: int = Field(1, description="Gradient accumulation steps")
+    dtype: torch.dtype = Field(torch.float32, description="Data type for tensors")
+    loss_func: Callable = Field(..., description="Loss function")
+    reg_func: Callable[[torch.nn.Module], float] = Field(
+        default=lambda model: 0,
+        description="Regularization function"
+    )
+    sparsity: float = Field(0.0, description="Sparsity level")
+    sparsity_dict: Optional[dict] = Field(
+        None,
+        description="Optional sparsity configuration dictionary"
+    )
+    scheduler_maker: Optional[Callable[[torch.optim.Optimizer]]] = Field(
+        None,
+        description="Learning rate scheduler (optional)"
+    )
+    gpu_id: int = Field(0, description="GPU ID to use")
+    trainable_loss: bool = Field(False, description="Whether loss is trainable")
+    strict_loading: bool = Field(True, description="Strict loading of state dicts")
+    new_save_format: bool = Field(True, description="Use new save format for models")
+    batch_norm_acc: bool = Field(False, description="Enable batch norm accumulation")
+    load_optim: bool = Field(True, description="Load optimizer state from checkpoint")
+    diversity_loss_func: Optional[Callable] = Field(
+        None,
+        description="Optional diversity loss function"
+    )
+    show_true_loss: bool = Field(False, description="Show true loss during training")
+    data_parallel: bool = Field(False, description="Use torch.nn.DataParallel")
+    weight_inherit: bool = Field(False, description="Inherit weights from checkpoint")
+    disable_logging: bool = Field(False, description="Disable logging", exclude=True)
+
+    def __init__(self, env=None, **kwargs):
+        super().__init__(**kwargs)
+        self._env = None
+        self.set_env(env)
+        self.batch_state = {}
+        self.device = torch.device(
+            self.params.device_str if ("cuda" in self.params.device_str and torch.cuda.is_available())
+            else "cpu"
+        )
+        self.log("loading model...")
+        self.model = self.load_model(self.params.model_type, self.params.model_kwargs)
+    
+        sparsity = self.params.sparsity
+        sparsity_dict = self.params.sparsity_dict
+        pruner_type = FineGrainedPruner if (sparsity or sparsity_dict) else DummyPruner
+        self.pruner = pruner_type(self.model, sparsity, sparsity_dict=sparsity_dict)
+        self.log("model loading finished.")
+        if self.params.trainable_loss:
+            self.load_loss_weights()
+        self.log("loading optimizer...")
+        self.optimizer = self.load_optimizer()
+        self.log("optimizer loading finished.")
+        self.scheduler = self.params.scheduler_maker(self.optimizer) if self.params.scheduler_maker else None
+        self.log(f"Model size: {calc_model_size(self.model)},  Num parameters: {count_parameters(self.model)}")
+
+        self.bn_accumulator = None
+        if self.params.batch_norm_acc and self.params.grad_acc_size > 1:
+            self.log("Using BatchNormAccumulator")
+            self.bn_accumulator = BatchNormAccumulator(
+                self.model,
+                num_accumulation_steps=self.params.grad_acc_size
+            )
+
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.get_env_param("use_emp", False))
+        self.diversity_loss_man = DummyFDL()
+        if self.params.diversity_loss_func:
+            div_func = self.params.diversity_loss_func
+            if not callable(div_func):
+                div_func = DIVERSITY_FUNCS[div_func]
+            self.diversity_loss_man = FeatureDiversityLoss(div_func, alpha=0.1)
+            self.diversity_loss_man.register_hooks(self.model)
+            self.log(f"Set diversity_loss_func to {div_func}")
+
+    def log(self, *args, **kwargs):
+        if self.disable_logging:
+            return
+        return print(f"{self.name}:", *args, **kwargs)
+    
+    def get_env_param(self, param_name, default_val=None):
+        if not self._env or param_name not in self.env.params:
+            return default_val
+        return self.env.params[param_name]
+
+    def set_env(self, env):
+        assert isinstance(env, TrainingEnv), f"{self.name}: {env} must be an instance of TrainingEnv."
+        self._env = env
+
+    @property
+    def env(self):
+        if not self._env:
+            raise Exception("No training environment set")
+        return self._env
+
+    def full_name(self):
+        prefix = "" if not self._env else self._env.params.name
+        return f"{prefix}{'-' if prefix and self.name else ''}{self.name}"
+    
+    def should_inherit_weights(self):
+        weight_inherit = self.params.weight_inherit
+        return weight_inherit and isinstance(weight_inherit, list | tuple) and len(weight_inherit) == 2
+
+    def load_optimizer(self, save_folder=None):
+        learn_rate = self.params.learn_rate
+        optim_type = self.params.optim_type
+        resume_from = self.get("resume_from", self.get_env_param("resume_from"))
+        optim_params = self.model.parameters()
+        if self.params.trainable_loss:
+            optim_params = list(optim_params) + list(self.params.loss_func.parameters())
+        
+        optimizer = optim_type(
+            optim_params, lr=0.01 if learn_rate is None else learn_rate,
+            eps=1e-4 if self.params.dtype == torch.float16 else 1e-8
+        )
+        weights_dir = (
+            self.env.weights_dir if save_folder is None else f"{save_folder}/weights"
+        ).rstrip('/')
+        if self.params.load_optim and not (self.should_inherit_weights() or self.params.weight_inherit == -1):
+            try:
+                optim_state = torch.load(
+                    f'{weights_dir}/{resume_from}_{self.full_name()}_optim.torch',
+                    map_location='cpu'
+                )
+                optimizer.load_state_dict(optim_state)
+                for g in optimizer.param_groups:
+                    if learn_rate is not None:
+                        g['lr'] = learn_rate
+                del optim_state
+            except FileNotFoundError:
+                self.log("optimizer loading failed, using new optimizers.")
+        else:
+            self.log("Using new optimizers.")
+        gc.collect()
+        torch.cuda.empty_cache()
+        return optimizer
+        
+    def load_model(self, model_type, model_kwargs, save_folder=None):
+        resume_from = self.get("resume_from", self.get_env_param("resume_from"))
+        model = model_type if model_kwargs is None else model_type(
+            **model_kwargs, device=self.device
+        )
+        if model_kwargs is None and not issubclass(model_type, ParamManager):
+            self.log("Model init args will not be saved as it is not an instance of ParamManager")
+        elif not issubclass(model_type, ParamManager):
+            model.as_dict = lambda: model_kwargs
+        if self.params.data_parallel:
+            model = DataParallel(model)
+        weights_dir = (
+            self.env.weights_dir if save_folder is None else f"{save_folder}/weights"
+        ).rstrip('/')
+        state_dict = None
+        if self.should_inherit_weights():
+            model_name, epoch = self.params.weight_inherit
+            parent_folder, _ = os.path.split(self.get_env_param("save_folder"))
+            state_dict = torch.load(
+                f"{parent_folder}/{model_name}/weights/{epoch}_{model_name}.torch",
+                map_location="cpu"
+            )
+        elif resume_from and self.params.weight_inherit != -1:
+            try:
+                state_dict = torch.load(
+                    f"{weights_dir}/{resume_from}_{self.full_name()}.torch",
+                    map_location="cpu"
+                )
+            except Exception as e:
+                self.log(f"Could not load from epoch {resume_from}")
+                raise e
+        if state_dict:
+            model.load_state_dict(state_dict, strict=self.params.strict_loading)
+            del state_dict
+
+        return model.to(device=self.device, dtype=self.params.dtype)
+
+    def load_loss_weights(self, save_folder=None):
+        resume_from = self.get("resume_from", self.get_env_param("resume_from"))
+        if not self.params.resume_from:
+            return
+        weights_dir = (
+            self.env.weights_dir if save_folder is None else f"{save_folder}/weights"
+        ).rstrip('/')
+        base_path = f"{weights_dir}/{resume_from}_{self.full_name()}"
+        try:
+            state_dict = torch.load(f"{base_path}_loss.torch", map_location='cpu')
+            self.params.loss_func.load_state_dict(state_dict)
+            del state_dict
+            self.log(f"Loaded loss weights from epoch {resume_from}")
+        except Exception as e:
+            self.log(f"Could not loss func weights load from epoch {resume_from}")
+
+    def safe_save_weights(self, save_obj, save_path, is_optim=False):
+        save_attempts = 3
+        saved = False
+        while not saved:
+            try:
+                torch.save(
+                    save_obj.state_dict(),
+                    save_path,
+                    _use_new_zipfile_serialization=self.params.new_save_format
+                )
+                return
+            except Exception as e:
+                save_attempts -= 1
+            if not save_attempts:
+                return e
+            if not is_optim:
+                for name, param in save_obj.named_parameters():
+                    if param.grad is not None and torch.isnan(param.grad).any():
+                        self.log(f"NaN found in gradients of {name}")
+                continue
+            # Try to fix state
+            for param_id, param_state in save_obj.state.items():
+                for state_var in ['exp_avg', 'exp_avg_sq']:
+                    if state_var not in param_state:
+                        continue
+                    var_value = param_state[state_var]
+                    if torch.isnan(var_value).any():
+                        self.log(f"NaN found in {state_var} for parameter ID {param_id}")
+                for key, value in param_state.items():
+                    if torch.is_tensor(value) and torch.isnan(value).any():
+                        self.log(f"Resetting {key} for parameter ID {param_id}")
+                        param_state[key] = torch.zeros_like(value)
+
+    def save(self, epoch, save_folder=None):
+        if self.params.gpu_id != 0:
+            return
+        weights_dir = (
+            self.env.weights_dir if save_folder is None else f"{save_folder}/weights"
+        ).rstrip('/')
+        base_path = f"{weights_dir}/{epoch + 1}_{self.full_name()}"
+        for save_type, save_obj in enumerate([("", self.model), ("_optim", self.optimizer)]):
+            if save_error := self.safe_save_weights(save_obj, f"{base_path}{save_type}.torch", bool(save_type)):
+                raise Exception(f"Failed to save {'optimizer' if save_type else 'model'} weights") from save_error
+        if self.params.trainable_loss:
+            torch.save(
+                self.params.loss_func.state_dict(),
+                f"{base_path}_loss.torch",
+                _use_new_zipfile_serialization=self.params.new_save_format
+            )
+
+    def eval(self):
+        return self.model.eval()
+
+    def train(self):
+        return self.model.train()
+
+    def prune(self):
+        return self.pruner.prune(self.model)
+
+    def zero_grad(self):
+        return self.optimizer.zero_grad()
+
+    def scheduler_step(self):
+        if self.scheduler:
+            self.scheduler.step()
+
+    def acc_loss(self, pred, expected, loss_tracker, loss_func=None, always_acc_indivs=False):
+        loss_func = self.params.loss_func if loss_func is None else loss_func
+        loss_part, indivs_part = loss_func(pred, expected)
+        loss_tracker[0] += loss_part
+        if not self.model.training and not always_acc_indivs:
+            for loss_name, val in indivs_part.items():
+                loss_tracker[1].setdefault(loss_name, 0)
+                loss_tracker[1][loss_name] += val
+        return loss_tracker
+
+    def get_images_idx(self, images, idx, slice_len=1):
+        num_classes = self.model.num_classes
+        if idx < 0:
+            idx += images.shape[1] // num_classes
+        return images[:, idx * num_classes:(idx + slice_len) * num_classes]
+
+    def channel_unpack(self, images):
+        num_classes = self.model.num_classes
+        num_images = images.shape[1] // num_classes
+        return [images[:, i * num_classes:(i + 1) * num_classes] for i in range(num_images)]
+
+    def preprocess(self, inp):
+        return inp
+
+    def on_batch_end(self):
+        self.batch_state = {}
+
+    def on_epoch_end(self):
+        self.scheduler_step()
+
+    def on_training_end(self):
+        if self.bn_accumulator:
+            self.bn_accumulator.remove_hooks()
+        self.diversity_loss_man.remove_hooks()
+        self.model.eval()
+        self.model.requires_grad_(False)
+
+    @property
+    def last_loss_components(self):
+        if StateKeys.LOSS_COMPS not in self.batch_state:
+            self.batch_state[StateKeys.LOSS_COMPS] = {}
+        return self.batch_state[StateKeys.LOSS_COMPS]
+
+    def calc_loss_modifier(self):
+        reg_loss = self.params.reg_func(self.model)
+        diversity_loss = self.diversity_loss_man.get_loss()
+        self.update_loss_components({
+            "reg_loss": reg_loss,
+            "diversity_loss": diversity_loss
+        })
+        return reg_loss + diversity_loss
+
+    def _calc_loss(self, inp, ex):
+        return self.call_loss_func(self.model(inp), ex)
+
+    def calc_loss(self, *args, **kwargs):
+        loss = self._calc_loss(*args, **kwargs)
+        if not self.model.training:
+            self.batch_state[StateKeys.LOSS] = loss
+        return loss
+
+    def get_progress_report(self):
+        loss = self.batch_state[StateKeys.LOSS]
+        label_prefix = self.name + "{}" if self.name else ""
+        target_loss_key = label_prefix.format('_') + "target_loss"
+        renamed_loss_cmps = {
+            target_loss_key: loss,
+            label_prefix.format('_') + "loss": loss,
+        }
+        loss_mod = 0
+        for key, val in self.last_loss_components.items():
+            loss_mod += val
+            renamed_loss_cmps[label_prefix.format('_') + key] = val
+        renamed_loss_cmps[target_loss_key] += loss_mod
+        to_print = ""
+        to_print += f" {label_prefix.format(' ')}Target: {np.format_float_scientific(loss + loss_mod, precision=3)}"
+        if self.params.show_true_loss:
+            to_print += f" {label_prefix.format(' ')}Loss: {np.format_float_scientific(loss, precision=3)}"
+        return to_print, renamed_loss_cmps
+
+    def calc_metrics(self):
+        return {}
+
+    def get_noise(self, inp, rand_mag=.064):
+        return torch.rand(inp.shape, device=self.device, dtype=self.dtype) * rand_mag - (rand_mag / 2)
+
+    def add_noise(self, inp, rand_mag=.064):
+        return torch.clamp(inp + self.get_noise(inp, rand_mag=rand_mag), 0, 1)
+
+    def do_optimizer_step(self, idx, grad_acc_size):
+        return (
+            (0 < grad_acc_size < 1 and idx == round(len(self.env.dataloader) * grad_acc_size))
+            or (grad_acc_size >= 1 and (idx + 1) % grad_acc_size == 0)
+        )
+
+    def loss_step(self, idx, loss):
+        self.scaler.scale(loss).backward(retain_graph=False)
+        did_step = self.do_optimizer_step(idx, self.params.grad_acc_size)
+        if did_step:
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer.zero_grad()
+            self.diversity_loss_man.reset_loss()
+        self.prune()
+        return did_step
+
+    def update_loss_components(self, loss_name, loss_val=None):
+        if self.model.training:
+            return
+        assert (isinstance(loss_name, str) and not_none(loss_val)) or isinstance(loss_name, dict)
+        if isinstance(loss_name, dict):
+            self.last_loss_components.update(loss_name)
+            return
+        self.last_loss_components[loss_name] = loss_val
+
+    def call_loss_func(self, *args, **kwargs):
+        result = self.params.loss_func(*args, **kwargs)
+        if len(result) >= 2 and not self.model.training:
+            self.update_loss_components(result[1])
+        return result[0]
+
+    def status_update(self, images, expected, pred, epoch, batch_num=None):
+        size = images.shape[-2:]
+        name = self.env.params.name
+        update_rate = self.env.params.update_rate
+        save_folder = self.env.params.save_folder
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        in_img = images[0]
+        ex = expected[0]
+        out_img, *_,  = (pred[0],)
+        show_images = []
+        for i in range(len(in_img) // self.model.num_classes):
+            show_images.append(in_img[self.model.num_classes * i: self.model.num_classes * (i + 1)])
+        show_images.extend([ex, out_img])
+        comp_img = torch.cat(show_images, 2).unsqueeze(0)
+        comp_img = tensor_to_img(comp_img, size[0], size[1] * len(show_images))
+        save_name = '' if name is None else (name + '_')
+        init_suffix = "_init" if (epoch + (0 if batch_num is None else batch_num)) == 0 else ''
+        batch_str = '' if batch_num is None else f"_{batch_num}"
+        write_rgb(f'{save_folder}/{save_name}progress_{epoch//update_rate}{batch_str}{init_suffix}.png', comp_img)
+        del comp_img
+        gc.collect()
+        torch.cuda.empty_cache()
+        
+        
 class TrainingEnv(ParamManager):
     name: Optional[str] = Field(None, description="Optional name for the training run")
     trainer_init_args: List[ModelTrainer | dict] = Field(default_factory=list, description="Trainer init config list")
@@ -429,418 +843,6 @@ class GANTrainingEnv(TrainingEnv):
         loss_dict[self.get_loss_name("loss_sq", self.gen)] = loss_dict[gen_loss_name] ** 2
         return loss_dict
 
-    
-class ModelTrainer(ParamManager):
-    name: Optional[str] = Field(None, description="Optional name for the trainer")
-    model_type: Type[torch.nn.Module] = Field(..., description="Model Class")
-    model_kwargs: Optional[dict] = Field(None, description="Model kwargs")
-    learn_rate: float = Field(1e-3, description="Learning rate for optimizer")
-    resume_from: Optional[int] = Field(None, description="Epoch to resume from")
-    device_str: str = Field("cuda", description="Device to run training on ('cpu' or 'cuda')")
-    optim_type: Type[torch.optim.Optimizer] = Field(
-        torch.optim.Adam,
-        description="Optimizer class to use"
-    )
-    use_checkpointing: bool = Field(False, description="Enable checkpointing")
-    grad_acc_size: int = Field(1, description="Gradient accumulation steps")
-    dtype: torch.dtype = Field(torch.float32, description="Data type for tensors")
-    loss_func: Callable = Field(..., description="Loss function")
-    reg_func: Callable[[torch.nn.Module], float] = Field(
-        default=lambda model: 0,
-        description="Regularization function"
-    )
-    sparsity: float = Field(0.0, description="Sparsity level")
-    sparsity_dict: Optional[dict] = Field(
-        None,
-        description="Optional sparsity configuration dictionary"
-    )
-    scheduler_maker: Optional[Callable[[torch.optim.Optimizer]]] = Field(
-        None,
-        description="Learning rate scheduler (optional)"
-    )
-    gpu_id: int = Field(0, description="GPU ID to use")
-    trainable_loss: bool = Field(False, description="Whether loss is trainable")
-    strict_loading: bool = Field(True, description="Strict loading of state dicts")
-    new_save_format: bool = Field(True, description="Use new save format for models")
-    batch_norm_acc: bool = Field(False, description="Enable batch norm accumulation")
-    load_optim: bool = Field(True, description="Load optimizer state from checkpoint")
-    diversity_loss_func: Optional[Callable] = Field(
-        None,
-        description="Optional diversity loss function"
-    )
-    show_true_loss: bool = Field(False, description="Show true loss during training")
-    data_parallel: bool = Field(False, description="Use torch.nn.DataParallel")
-    weight_inherit: bool = Field(False, description="Inherit weights from checkpoint")
-    disable_logging: bool = Field(False, description="Disable logging", exclude=True)
-
-    def __init__(self, env=None, **kwargs):
-        super().__init__(**kwargs)
-        self._env = None
-        self.set_env(env)
-        self.batch_state = {}
-        self.device = torch.device(
-            self.params.device_str if ("cuda" in self.params.device_str and torch.cuda.is_available())
-            else "cpu"
-        )
-        self.log("loading model...")
-        self.model = self.load_model(self.params.model_type, self.params.model_kwargs)
-        # gc.collect()
-        # torch.cuda.empty_cache()
-        
-        sparsity = self.params.sparsity
-        sparsity_dict = self.params.sparsity_dict
-        pruner_type = FineGrainedPruner if (sparsity or sparsity_dict) else DummyPruner
-        self.pruner = pruner_type(self.model, sparsity, sparsity_dict=sparsity_dict)
-        self.log("model loading finished.")
-        if self.params.trainable_loss:
-            self.load_loss_weights()
-        self.log("loading optimizer...")
-        self.optimizer = self.load_optimizer()
-        self.log("optimizer loading finished.")
-        self.scheduler = self.params.scheduler_maker(self.optimizer) if self.params.scheduler_maker else None
-        self.log(f"Model size: {calc_model_size(self.model)},  Num parameters: {count_parameters(self.model)}")
-
-        self.bn_accumulator = None
-        if self.params.batch_norm_acc and self.params.grad_acc_size > 1:
-            self.log("Using BatchNormAccumulator")
-            self.bn_accumulator = BatchNormAccumulator(
-                self.model,
-                num_accumulation_steps=self.params.grad_acc_size
-            )
-
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.get_env_param("use_emp", False))
-        self.diversity_loss_man = DummyFDL()
-        if self.params.diversity_loss_func:
-            div_func = self.params.diversity_loss_func
-            if not callable(div_func):
-                div_func = DIVERSITY_FUNCS[div_func]
-            self.diversity_loss_man = FeatureDiversityLoss(div_func, alpha=0.1)
-            self.diversity_loss_man.register_hooks(self.model)
-            self.log(f"Set diversity_loss_func to {div_func}")
-
-    def log(self, *args, **kwargs):
-        if self.disable_logging:
-            return
-        return print(f"{self.name}:", *args, **kwargs)
-    
-    def get_env_param(self, param_name, default_val=None):
-        if not self._env or param_name not in self.env.params:
-            return default_val
-        return self.env.params[param_name]
-
-    def set_env(self, env):
-        assert isinstance(env, TrainingEnv), f"{self.name}: {env} must be an instance of TrainingEnv."
-        self._env = env
-
-    @property
-    def env(self):
-        if not self._env:
-            raise Exception("No training environment set")
-        return self._env
-
-    def full_name(self):
-        prefix = "" if not self._env else self._env.params.name
-        return f"{prefix}{'-' if prefix and self.name else ''}{self.name}"
-    
-    def should_inherit_weights(self):
-        weight_inherit = self.params.weight_inherit
-        return weight_inherit and isinstance(weight_inherit, list | tuple) and len(weight_inherit) == 2
-
-    def load_optimizer(self, save_folder=None):
-        learn_rate = self.params.learn_rate
-        optim_type = self.params.optim_type
-        resume_from = self.get("resume_from", self.get_env_param("resume_from"))
-        optim_params = self.model.parameters()
-        if self.params.trainable_loss:
-            optim_params = list(optim_params) + list(self.params.loss_func.parameters())
-        
-        optimizer = optim_type(
-            optim_params, lr=0.01 if learn_rate is None else learn_rate,
-            eps=1e-4 if self.params.dtype == torch.float16 else 1e-8
-        )
-        weights_dir = (
-            self.env.weights_dir if save_folder is None else f"{save_folder}/weights"
-        ).rstrip('/')
-        if self.params.load_optim and not (self.should_inherit_weights() or self.params.weight_inherit == -1):
-            try:
-                optim_state = torch.load(
-                    f'{weights_dir}/{resume_from}_{self.full_name()}_optim.torch',
-                    map_location='cpu'
-                )
-                optimizer.load_state_dict(optim_state)
-                for g in optimizer.param_groups:
-                    if learn_rate is not None:
-                        g['lr'] = learn_rate
-                del optim_state
-            except FileNotFoundError:
-                self.log("optimizer loading failed, using new optimizers.")
-        else:
-            self.log("Using new optimizers.")
-        gc.collect()
-        torch.cuda.empty_cache()
-        return optimizer
-        
-    def load_model(self, model_type, model_kwargs, save_folder=None):
-        resume_from = self.get("resume_from", self.get_env_param("resume_from"))
-        model = model_type if model_kwargs is None else model_type(
-            **model_kwargs, device=self.device
-        )
-        if self.params.data_parallel:
-            model = DataParallel(model)
-        weights_dir = (
-            self.env.weights_dir if save_folder is None else f"{save_folder}/weights"
-        ).rstrip('/')
-        state_dict = None
-        if self.should_inherit_weights():
-            model_name, epoch = self.params.weight_inherit
-            parent_folder, _ = os.path.split(self.get_env_param("save_folder"))
-            state_dict = torch.load(
-                f"{parent_folder}/{model_name}/weights/{epoch}_{model_name}.torch",
-                map_location="cpu"
-            )
-        elif resume_from and self.params.weight_inherit != -1:
-            try:
-                state_dict = torch.load(
-                    f"{weights_dir}/{resume_from}_{self.full_name()}.torch",
-                    map_location="cpu"
-                )
-            except Exception as e:
-                self.log(f"Could not load from epoch {resume_from}")
-                raise e
-        if state_dict:
-            model.load_state_dict(state_dict, strict=self.params.strict_loading)
-            del state_dict
-
-        return model.to(device=self.device, dtype=self.params.dtype)
-
-    def load_loss_weights(self, save_folder=None):
-        resume_from = self.get("resume_from", self.get_env_param("resume_from"))
-        if not self.params.resume_from:
-            return
-        weights_dir = (
-            self.env.weights_dir if save_folder is None else f"{save_folder}/weights"
-        ).rstrip('/')
-        base_path = f"{weights_dir}/{resume_from}_{self.full_name()}"
-        try:
-            state_dict = torch.load(f"{base_path}_loss.torch", map_location='cpu')
-            self.params.loss_func.load_state_dict(state_dict)
-            del state_dict
-            self.log(f"Loaded loss weights from epoch {resume_from}")
-        except Exception as e:
-            self.log(f"Could not loss func weights load from epoch {resume_from}")
-
-    def safe_save_weights(self, save_obj, save_path, is_optim=False):
-        save_attempts = 3
-        saved = False
-        while not saved:
-            try:
-                torch.save(
-                    save_obj.state_dict(),
-                    save_path,
-                    _use_new_zipfile_serialization=self.params.new_save_format
-                )
-                return
-            except Exception as e:
-                save_attempts -= 1
-            if not save_attempts:
-                return e
-            if not is_optim:
-                for name, param in save_obj.named_parameters():
-                    if param.grad is not None and torch.isnan(param.grad).any():
-                        self.log(f"NaN found in gradients of {name}")
-                continue
-            # Try to fix state
-            for param_id, param_state in save_obj.state.items():
-                for state_var in ['exp_avg', 'exp_avg_sq']:
-                    if state_var not in param_state:
-                        continue
-                    var_value = param_state[state_var]
-                    if torch.isnan(var_value).any():
-                        self.log(f"NaN found in {state_var} for parameter ID {param_id}")
-                for key, value in param_state.items():
-                    if torch.is_tensor(value) and torch.isnan(value).any():
-                        self.log(f"Resetting {key} for parameter ID {param_id}")
-                        param_state[key] = torch.zeros_like(value)
-
-    def save(self, epoch, save_folder=None):
-        if self.params.gpu_id != 0:
-            return
-        weights_dir = (
-            self.env.weights_dir if save_folder is None else f"{save_folder}/weights"
-        ).rstrip('/')
-        base_path = f"{weights_dir}/{epoch + 1}_{self.full_name()}"
-        for save_type, save_obj in enumerate([("", self.model), ("_optim", self.optimizer)]):
-            if save_error := self.safe_save_weights(save_obj, f"{base_path}{save_type}.torch", bool(save_type)):
-                raise Exception(f"Failed to save {'optimizer' if save_type else 'model'} weights") from save_error
-        if self.params.trainable_loss:
-            torch.save(
-                self.params.loss_func.state_dict(),
-                f"{base_path}_loss.torch",
-                _use_new_zipfile_serialization=self.params.new_save_format
-            )
-
-    def eval(self):
-        return self.model.eval()
-
-    def train(self):
-        return self.model.train()
-
-    def prune(self):
-        return self.pruner.prune(self.model)
-
-    def zero_grad(self):
-        return self.optimizer.zero_grad()
-
-    def scheduler_step(self):
-        if self.scheduler:
-            self.scheduler.step()
-
-    def acc_loss(self, pred, expected, loss_tracker, loss_func=None, always_acc_indivs=False):
-        loss_func = self.params.loss_func if loss_func is None else loss_func
-        loss_part, indivs_part = loss_func(pred, expected)
-        loss_tracker[0] += loss_part
-        if not self.model.training and not always_acc_indivs:
-            for loss_name, val in indivs_part.items():
-                loss_tracker[1].setdefault(loss_name, 0)
-                loss_tracker[1][loss_name] += val
-        return loss_tracker
-
-    def get_images_idx(self, images, idx, slice_len=1):
-        num_classes = self.model.num_classes
-        if idx < 0:
-            idx += images.shape[1] // num_classes
-        return images[:, idx * num_classes:(idx + slice_len) * num_classes]
-
-    def channel_unpack(self, images):
-        num_classes = self.model.num_classes
-        num_images = images.shape[1] // num_classes
-        return [images[:, i * num_classes:(i + 1) * num_classes] for i in range(num_images)]
-
-    def preprocess(self, inp):
-        return inp
-
-    def on_batch_end(self):
-        self.batch_state = {}
-
-    def on_epoch_end(self):
-        self.scheduler_step()
-
-    def on_training_end(self):
-        if self.bn_accumulator:
-            self.bn_accumulator.remove_hooks()
-        self.diversity_loss_man.remove_hooks()
-        self.model.eval()
-        self.model.requires_grad_(False)
-
-    @property
-    def last_loss_components(self):
-        if StateKeys.LOSS_COMPS not in self.batch_state:
-            self.batch_state[StateKeys.LOSS_COMPS] = {}
-        return self.batch_state[StateKeys.LOSS_COMPS]
-
-    def calc_loss_modifier(self):
-        reg_loss = self.params.reg_func(self.model)
-        diversity_loss = self.diversity_loss_man.get_loss()
-        self.update_loss_components({
-            "reg_loss": reg_loss,
-            "diversity_loss": diversity_loss
-        })
-        return reg_loss + diversity_loss
-
-    def _calc_loss(self, inp, ex):
-        return self.call_loss_func(self.model(inp), ex)
-
-    def calc_loss(self, *args, **kwargs):
-        loss = self._calc_loss(*args, **kwargs)
-        if not self.model.training:
-            self.batch_state[StateKeys.LOSS] = loss
-        return loss
-
-    def get_progress_report(self):
-        loss = self.batch_state[StateKeys.LOSS]
-        label_prefix = self.name + "{}" if self.name else ""
-        target_loss_key = label_prefix.format('_') + "target_loss"
-        renamed_loss_cmps = {
-            target_loss_key: loss,
-            label_prefix.format('_') + "loss": loss,
-        }
-        loss_mod = 0
-        for key, val in self.last_loss_components.items():
-            loss_mod += val
-            renamed_loss_cmps[label_prefix.format('_') + key] = val
-        renamed_loss_cmps[target_loss_key] += loss_mod
-        to_print = ""
-        to_print += f" {label_prefix.format(' ')}Target: {np.format_float_scientific(loss + loss_mod, precision=3)}"
-        if self.params.show_true_loss:
-            to_print += f" {label_prefix.format(' ')}Loss: {np.format_float_scientific(loss, precision=3)}"
-        return to_print, renamed_loss_cmps
-
-    def calc_metrics(self):
-        return {}
-
-    def get_noise(self, inp, rand_mag=.064):
-        return torch.rand(inp.shape, device=self.device, dtype=self.dtype) * rand_mag - (rand_mag / 2)
-
-    def add_noise(self, inp, rand_mag=.064):
-        return torch.clamp(inp + self.get_noise(inp, rand_mag=rand_mag), 0, 1)
-
-    def do_optimizer_step(self, idx, grad_acc_size):
-        return (
-            (0 < grad_acc_size < 1 and idx == round(len(self.env.dataloader) * grad_acc_size))
-            or (grad_acc_size >= 1 and (idx + 1) % grad_acc_size == 0)
-        )
-
-    def loss_step(self, idx, loss):
-        self.scaler.scale(loss).backward(retain_graph=False)
-        did_step = self.do_optimizer_step(idx, self.params.grad_acc_size)
-        if did_step:
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.optimizer.zero_grad()
-            self.diversity_loss_man.reset_loss()
-        self.prune()
-        return did_step
-
-    def update_loss_components(self, loss_name, loss_val=None):
-        if self.model.training:
-            return
-        assert (isinstance(loss_name, str) and not_none(loss_val)) or isinstance(loss_name, dict)
-        if isinstance(loss_name, dict):
-            self.last_loss_components.update(loss_name)
-            return
-        self.last_loss_components[loss_name] = loss_val
-
-    def call_loss_func(self, *args, **kwargs):
-        result = self.params.loss_func(*args, **kwargs)
-        if len(result) >= 2 and not self.model.training:
-            self.update_loss_components(result[1])
-        return result[0]
-
-    def status_update(self, images, expected, pred, epoch, batch_num=None):
-        size = images.shape[-2:]
-        name = self.env.params.name
-        update_rate = self.env.params.update_rate
-        save_folder = self.env.params.save_folder
-
-        gc.collect()
-        torch.cuda.empty_cache()
-        in_img = images[0]
-        ex = expected[0]
-        out_img, *_,  = (pred[0],)
-        show_images = []
-        for i in range(len(in_img) // self.model.num_classes):
-            show_images.append(in_img[self.model.num_classes * i: self.model.num_classes * (i + 1)])
-        show_images.extend([ex, out_img])
-        comp_img = torch.cat(show_images, 2).unsqueeze(0)
-        comp_img = tensor_to_img(comp_img, size[0], size[1] * len(show_images))
-        save_name = '' if name is None else (name + '_')
-        init_suffix = "_init" if (epoch + (0 if batch_num is None else batch_num)) == 0 else ''
-        batch_str = '' if batch_num is None else f"_{batch_num}"
-        write_rgb(f'{save_folder}/{save_name}progress_{epoch//update_rate}{batch_str}{init_suffix}.png', comp_img)
-        del comp_img
-        gc.collect()
-        torch.cuda.empty_cache()
-
 
 class DiscrimTrainer(ModelTrainer):
     display_confidence: bool = Field(True, description="Whether to display model confidence")
@@ -946,5 +948,3 @@ class DiscrimTrainer(ModelTrainer):
         fake = pred
         discrim_fake = fake.detach()
         return real, fake, discrim_real, discrim_fake
-
-
