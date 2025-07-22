@@ -4,7 +4,7 @@ import importlib
 
 import operator as op
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, create_model
 from torch import nn
 from typing import Any, Tuple, Callable
 
@@ -29,33 +29,48 @@ def get_module_name(cls, shortest=True):
     return f"{module_path}.{class_name}"
 
 
-class ParamManager(BaseModel):
-    """Base class to hold parameters with validation and default handling."""
-    class Config:
-        extra = "forbid"
+class ParamManager:
+    """Auto-validating parameter manager without BaseModel inheritance."""
 
-    def __getitem__(self, item):
-        """Allow dict-style access: obj['param']"""
-        return getattr(self, item)
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
 
-    def __setitem__(self, key, value):
-        """Allow dict-style assignment: obj['param'] = val"""
-        setattr(self, key, value)
+        # Collect annotated fields and defaults
+        annotations = getattr(cls, '__annotations__', {})
+        defaults = {
+            k: getattr(cls, k)
+            for k in annotations.keys()
+            if hasattr(cls, k)
+        }
 
-    def get(self, key, default=None):
-        return getattr(self, key, default=default)
+        # Auto-generate a Pydantic BaseModel for validation
+        cls._schema = create_model(
+            f"{cls.__name__}Schema",
+            __base__=BaseModel,
+            __config__=ConfigDict(extra="forbid", frozen=True),
+            **{
+                name: (typ, defaults.get(name, ...))
+                for name, typ in annotations.items()
+            }
+        )
 
-    def as_dict(self):
-        """Serialize all params to dict"""
-        return self.model_dump()
-    
-    # Temporary backwards compatibility
+    def __init__(self, **kwargs):
+        # Validate kwargs using the auto-generated Pydantic model
+        validated = self._schema(**kwargs)
+        for k in validated.__fields__:
+            object.__setattr__(self, k, getattr(validated, k))
+        self._params = validated
+
     @property
     def params(self):
-        return self
+        return self._params
+
+    def as_dict(self, *args, **kwargs) -> dict:
+        """Dump only the validated parameter fields."""
+        return self.params.model_dump(*args, **kwargs)
 
 
-class SerializableModule(ParamManager, nn.Module):
+class SerializableModule(nn.Module, ParamManager):
     def __init__(self, **kwargs):
         nn.Module.__init__(self)
         ParamManager.__init__(self, **kwargs)
