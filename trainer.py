@@ -19,12 +19,13 @@ from torch.utils.data.dataloader import RandomSampler
 
 from components.gradient_accumulation import BatchNormAccumulator
 from components.loss_manager import LossManager
-from components.param_manager import ParamManager
 from image_utils import tensor_to_img, write_rgb
 from loss.diversity import DIVERSITY_FUNCS, FeatureDiversityLoss, DummyFDL, compute_kid, compute_fid
+from loss.mixup import mixup_data, mixup_bce
 from pruning import FineGrainedPruner, DummyPruner
-from utils import calc_model_size, count_parameters, percent_chance, shuffle_tensor
+from utils import calc_model_size, count_parameters, percent_chance, not_none, shuffle_tensor
 from sampling import RandResBatchSampler
+from serialization import ParamManager, Lambda
 
 # Flag
 use_multiprocess = True
@@ -88,6 +89,7 @@ class ModelTrainer(ParamManager):
     loss_func: Callable = Field(..., description="Loss function")
     reg_func: Callable[[torch.nn.Module], float] = Field(
         default=lambda model: 0,
+        default=Lambda("lambda model: 0"),
         description="Regularization function"
     )
     sparsity: float = Field(0.0, description="Sparsity level")
@@ -729,6 +731,7 @@ class GANTrainingEnv(TrainingEnv):
             self.discrim_loss_scale = lambda epoch, **kwargs: self.params.gan_loss_scale
         if self.params.watch_loss_funcs is None:
             self.params["watch_loss_funcs"] = {}
+
     def calc_adv_loss(self, overall_epoch, loss, discrim_loss):
         loss_item = loss.item()
         gan_loss_scale = self.discrim_loss_scale(overall_epoch, loss=loss_item)
@@ -736,6 +739,7 @@ class GANTrainingEnv(TrainingEnv):
         if self.params.adv_loss_clamp:
             adv_loss = torch.clamp(adv_loss, min=None, max=loss_item)
         return adv_loss
+
     def get_dataloader(self):
         # batch_sampler option is mutually exclusive with batch_size, shuffle, sampler, and drop_last
         if not self.params.efficient_multi_res or not self.params.rand_downscale_options:
@@ -751,6 +755,7 @@ class GANTrainingEnv(TrainingEnv):
             multiprocessing_context=new_multiprocess_ctx if self.params.num_workers > 0 else None,
             num_workers=self.params.num_workers
         )
+
     def run_batch(self, idx, overall_epoch, batch):
         images = self.preprocess(batch)
         # defs
@@ -860,6 +865,7 @@ class DiscrimTrainer(ModelTrainer):
         if self.params.show_FID:
             to_print += f" FID {loss_cmps.get('FID', -1)}"
         return to_print, renamed_cmps
+
     def _calc_loss(self, images, recon_x, calc_metrics=False):
         device = self.device
         dtype = self.dtype
@@ -903,6 +909,7 @@ class DiscrimTrainer(ModelTrainer):
         if calc_metrics:
             self.update_loss_components(self.calc_metrics(images, recon_x))
         return loss
+
     def calc_loss_modifier(self):
         loss_mod = super().calc_loss_modifier()
         if self.params.fm_loss_mult:
@@ -914,6 +921,7 @@ class DiscrimTrainer(ModelTrainer):
             loss_mod -= fm_loss
             self.update_loss_components("fm_loss", fm_loss)
         return loss_mod
+
     @torch.no_grad()
     def calc_metrics(self, real, fake):
         metrics = {}
@@ -922,6 +930,7 @@ class DiscrimTrainer(ModelTrainer):
         if self.params.show_FID:
             metrics["FID"] = compute_fid(real, fake)
         return metrics
+
     def preprocess(self, images, pred, *_args):
         real = discrim_real = images
         fake = pred
