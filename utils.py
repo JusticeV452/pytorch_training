@@ -27,9 +27,11 @@ def np_nd_apply(arr, transform_func, *args):
 def percent_chance(chance):
     return random.uniform(0, 1) <= chance
 
+
 def permute(items):
     random.shuffle(items)
     return items
+
 
 def int_round(n, places=None):
     return int(round(n, places))
@@ -91,12 +93,6 @@ def parse_filter_size(filter_size):
     return (filter_size, filter_size) if isinstance(filter_size, int) else filter_size
 
 
-def safe_dict_pop(D, key, default=None):
-    if key in D:
-        return D.pop(key)
-    return default
-
-
 def channel_width_flatten(tensor):
     """
     Reshapes a tensor of images concatenated in the channel dimension 
@@ -125,6 +121,10 @@ def channel_width_flatten(tensor):
     reshaped_tensor = torch.cat(images, dim=3)  # Shape: (N, 3, H, W * num_images)
 
     return reshaped_tensor
+
+
+def not_none(obj):
+    return type(obj) is not type(None)
 
 
 def count_parameters(model):
