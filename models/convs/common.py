@@ -10,6 +10,7 @@ from typing import Optional, Tuple, Type, Union
 from components.common import SEBlock
 from models.convs.dynamic import FILTER_TYPES, DynamicConv2d_v2
 from serialization import SerializableModule, Lambda, AutoLambda
+from utils import not_none
 
 
 class ConvLayer(SerializableModule):
@@ -30,7 +31,7 @@ class ConvLayer(SerializableModule):
     conv_type: Type[nn.Module] = Field(
         nn.Conv2d, description="Convolution layer class"
     )
-    residual: Optional[Union[str, dict, float, int, AutoLambda[Tuple[()], torch.Tensor]]] = Field(
+    residual_cfg: Optional[Union[str, dict, float, int, AutoLambda[Tuple[()], torch.Tensor]]] = Field(
         None, description="Residual connection type or configuration"
     )
     use_bias: bool = Field(False, description="Whether to use bias in convolutions")
@@ -45,9 +46,7 @@ class ConvLayer(SerializableModule):
     def __init__(self, in_channels, out_channels, **kwargs):
         super().__init__(in_channels=in_channels, out_channels=out_channels, **kwargs)
         # residual = None if in_channels != out_channels else residual
-        residual = self.residual
-        in_channels = self.in_channels
-        out_channels = self.out_channels
+        residual_cfg = self.residual_cfg
         num_convs = self.num_convs
         filter_gen = self.filter_gen
 
@@ -57,21 +56,21 @@ class ConvLayer(SerializableModule):
 
         self.residual_transform = None
         self.residual_type = None
-        if callable(residual):
+        if callable(residual_cfg):
             self.residual_type = "callable"
-            self.residual = nn.Parameter(residual())
+            self.residual = nn.Parameter(residual_cfg())
             self.residual_transform = lambda result, inp: result + self.residual * inp
-        elif type(residual) is dict:
+        elif type(residual_cfg) is dict:
             self.residual_type = "conv"
             self.residual = nn.Conv2d(
-                in_channels=in_channels, out_channels=out_channels, **residual)
+                in_channels=in_channels, out_channels=out_channels, **residual_cfg)
             self.residual_transform = lambda result, inp: result + self.residual(inp)
-        elif type(residual) in [float, int]:
+        elif type(residual_cfg) in [float, int]:
             self.residual_type = "constant"
-            self.residual = nn.Parameter(torch.full((1,), residual)[0])
+            self.residual = nn.Parameter(torch.full((1,), residual_cfg)[0])
             self.residual_transform = lambda result, inp: result + self.residual * inp
-        elif "pad" in residual:
-            self.residual_type = residual
+        elif not_none(residual_cfg) and "pad" in residual_cfg:
+            self.residual_type = residual_cfg
             self.residual = nn.Parameter(torch.ones(in_channels))
             self.residual_transform = self.residual_pad
         if not mid_channels or num_convs == 1:
