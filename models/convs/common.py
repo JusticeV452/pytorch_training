@@ -25,7 +25,7 @@ class ConvLayer(SerializableModule):
         nn.BatchNorm2d, description="Normalization layer class"
     )
     activ_type: AutoLambda[Tuple[()], nn.Module] = Field(
-        default_factory=Lambda(nn.ReLU, inplace=True),
+        Lambda(nn.ReLU, inplace=True),
         description="Activation function factory"
     )
     conv_type: Type[nn.Module] = Field(
@@ -43,17 +43,20 @@ class ConvLayer(SerializableModule):
         None, description="Int: acts as reduction_ratio for SEBlock, func: factory for se block"
     )
 
-    def __init__(self, in_channels, out_channels, **kwargs):
-        super().__init__(in_channels=in_channels, out_channels=out_channels, **kwargs)
-        # residual = None if in_channels != out_channels else residual
-        residual_cfg = self.residual_cfg
-        num_convs = self.num_convs
-        filter_gen = self.filter_gen
-
+    def __init__(self, in_channels, out_channels, mid_channels=None, num_convs=2, filter_gen=None, **kwargs):
+        if not mid_channels or num_convs:
+            mid_channels = out_channels
         if filter_gen:
             filter_gen = FILTER_TYPES[filter_gen] if isinstance(filter_gen, str) else filter_gen
-            self.conv_type = Lambda(DynamicConv2d_v2, filt_gen=filter_gen)
+            kwargs["conv_type"] = Lambda(DynamicConv2d_v2, filt_gen=filter_gen)
+        super().__init__(
+            in_channels=in_channels, out_channels=out_channels,
+            mid_channels=mid_channels, num_convs=num_convs,
+            filter_gen=filter_gen, **kwargs
+        )
 
+        # residual = None if in_channels != out_channels else residual
+        residual_cfg = self.residual_cfg
         self.residual_transform = None
         self.residual_type = None
         if callable(residual_cfg):
@@ -73,8 +76,6 @@ class ConvLayer(SerializableModule):
             self.residual_type = residual_cfg
             self.residual = nn.Parameter(torch.ones(in_channels))
             self.residual_transform = self.residual_pad
-        if not mid_channels or num_convs == 1:
-            mid_channels = out_channels
 
         def sub_layer(in_channels, out_channels):
             layer = [self.conv_type(
