@@ -1,8 +1,9 @@
-jsbeautifier
+jsbeautifier==1.15.4
 multiprocess==0.70.18
 numpy==2.2.3
+kornia==0.8.1
 opencv_python==4.11.0.86
-pydantic
+pydantic==2.11.7
 torch==2.7.1
 torch_fidelity==0.3.0
 torchmetrics==1.7.4
