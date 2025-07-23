@@ -4,9 +4,36 @@ import importlib
 
 import operator as op
 
-from pydantic import BaseModel, ConfigDict, Field, create_model
+from pydantic import BaseModel, ConfigDict, GetCoreSchemaHandler, Field, PrivateAttr, create_model, model_serializer
+from pydantic_core import core_schema
 from torch import nn
 from typing import Any, Tuple, Callable
+from typing import Generic, TypeVar, Tuple, Callable, Any, Union
+
+ArgsT = TypeVar('ArgsT')
+ReturnT = TypeVar('ReturnT')
+
+PARAM_MAN_SER_PREFIX = "_ParamManager"
+
+def is_serialized_param_man(val) -> bool:
+    return type(val) is dict and PARAM_MAN_SER_PREFIX in val
+def parse_serialized_param_man(val) -> dict:
+    return val["config"]
+class AutoLambda(Generic[ArgsT, ReturnT]):
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler: GetCoreSchemaHandler):
+        def validate(v):
+            if v is None or isinstance(v, Lambda):
+                return v
+            try:
+                if is_serialized_param_man(v):
+                    v = parse_serialized_param_man(v)
+                lam = Lambda(**v) if type(v) is dict else Lambda(v)
+            except Exception as e:
+                raise ValueError(f"'{v}' cannot be cast to Lambda") from e
+            return lam
+
+        return core_schema.no_info_plain_validator_function(validate)
 
 
 def get_module_name(cls, shortest=True):
