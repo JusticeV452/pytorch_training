@@ -101,6 +101,14 @@ class AutoLambda(Generic[Args, Return]):
             return lam
 
         return core_schema.no_info_plain_validator_function(validate)
+    
+    @classmethod
+    def _PM_auto_cast(self, obj):
+        if isinstance(obj, Lambda):
+            print("AutoLambda-_PM_auto_cast-nvm")
+            return obj
+        return Lambda(obj)
+
 
 
 def get_module_name(cls, shortest=True):
@@ -151,6 +159,25 @@ class ParamManager:
     def __init_subclass__(cls, inherit_fields: bool = True, **kwargs):
         super().__init_subclass__(**kwargs)
 
+        def is_generic_type(typ):
+            return get_origin(typ) is not None
+
+        def get_auto_caster(typ):
+            # Directly from typ or its origin
+            origin = get_origin(typ)
+            for candidate in [typ, origin]:
+                if candidate and hasattr(candidate, "_PM_auto_cast"):
+                    return False, candidate
+
+            # If Union (like Optional[T]), check the arguments
+            if origin is Union:
+                args = get_args(typ)
+                for arg in args:
+                    if (auto_caster := get_auto_caster(arg)):
+                        return type(None) in args, auto_caster[-1]
+
+            return False, None
+
         # Collect annotated fields and defaults
         annotations = {}
         defaults = {}
@@ -180,18 +207,22 @@ class ParamManager:
                 else:
                     default = ...
 
-            origin = get_origin(typ)
-            args = get_args(typ)
-            
-            def type_contains_Lambda(origin, args):
-                return origin is Union and AutoLambda in [get_origin(a) or a for a in args]
-
-            if (
-                (origin == AutoLambda and default is not ...)
-                or (type_contains_Lambda(origin, args) and callable(default))
-            ) and not isinstance(default, Lambda):
-                print(f"Wrapping '{default}' in Lambda")
-                default = Lambda(default)
+            if default is not ...:
+                optional, auto_caster = get_auto_caster(typ)
+                if (
+                    auto_caster
+                    and (not optional or not_none(default))
+                    and (is_generic_type(typ) or not isinstance(default, auto_caster))
+                ):
+                    try:
+                        print(f"Wrapping '{default}' using {auto_caster}")
+                        default = auto_caster._PM_auto_cast(default)
+                    except Exception as e:
+                        get_class_name = lambda obj: f"{obj.__module__}.{obj.__name__}"
+                        raise TypeError(
+                            f"Error casting default '{default}' of Field '{name}' using "
+                            f"{get_class_name(auto_caster)} in class '{get_class_name(cls)}"
+                        ) from e
 
             fields[name] = (typ, default)
 
@@ -369,6 +400,10 @@ class SafeEvaluator:
         raise NameError(f"Function '{name}' is not allowed")
 
 
+# TODO: Remove arg_arity (make arity property base on passed kwargs and func kwargs)
+# TODO: Add limited support for passing literal lambda objects (dill.source.getsource / inspect.getsource)
+# TODO: Allow nested calling (maybe provide sets of args, base_func(*args_set1)(*args_set2)...(*args_setn))
+# TODO: Refactor serialization into submodules with (_base/utils/_core/common).py for common functions
 class Lambda(ParamManager, ModelComponent):
     # """A ParamManager-wrapped Lambda that supports arbitrary call signatures."""
 
@@ -436,7 +471,6 @@ class Lambda(ParamManager, ModelComponent):
         if self.func_caching_:
             self._func = func
         return func
-
     
     def get_func(self):
         return self.eval_func_name()
