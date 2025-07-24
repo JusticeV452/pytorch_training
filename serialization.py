@@ -173,17 +173,62 @@ class ParamManager:
     def __init__(self, **kwargs):
         # Validate kwargs using the auto-generated Pydantic model
         validated = self._schema(**kwargs)
-        for k in validated.__fields__:
+        for k in self._schema.model_fields:
             object.__setattr__(self, k, getattr(validated, k))
         self._params = validated
 
+    def __dict__(self):
+        return self.as_dict()
+    
+    def __str__(self):
+        return self.model_dump_json()
+        
     @property
     def params(self):
         return self._params
+    
+    def param_model_dump(self, *args, **kwargs):
+        return self.params.model_dump(*args, **kwargs)
+
+    def model_dump(self, *args, explicit=True, **kwargs):
+        dump = {}
+        for k, v in self.param_model_dump(*args, **kwargs).items():
+            dump[k] = (
+                v.model_dump(*args, explicit=explicit, **kwargs)
+                if isinstance(v, ParamManager) else v
+            )
+        return dump if not explicit else {
+            "_ParamManager": get_module_name(self.__class__),
+            "config": dump
+        }
+
+    def model_dump_json(self, *args, explicit=True, **kwargs):
+        return json.dumps(self.model_dump(
+            *args, explicit=explicit, **kwargs
+        ))
 
     def as_dict(self, *args, **kwargs) -> dict:
-        """Dump only the validated parameter fields."""
-        return self.params.model_dump(*args, **kwargs)
+        return self.model_dump(*args, **kwargs)
+    
+    def save(self, save_path):
+        return write_json(save_path, self.as_dict())
+    
+    @classmethod
+    def load(cls, path):
+        return cls.load_dict(load_json(path))
+    
+    @classmethod
+    def load_dict(cls, inp):
+        return eval_obj_name(inp[PARAM_MAN_SER_PREFIX])(**{
+            k: cls.load_dict(v)
+            if is_serialized_param_man(v) else v
+            for k, v in inp["config"].items()
+        })
+
+    @classmethod
+    def load_json(cls, inp):
+        return cls.load_dict(json.loads(inp))
+    
 
 
 class SerializableModule(nn.Module, ParamManager):
@@ -332,12 +377,10 @@ class Lambda(ParamManager, ModelComponent):
         self._func = None if isinstance(func_name, str) or not func_caching_ else func_name
         assert self._func is None or func_name_callable, f"'{func_name}' is not callable."
 
-    def model_dump(self, *args, **kwargs) -> dict:
-        """Flatten base_kwargs into the top level of the dict."""
-        data = super().model_dump(*args, **kwargs)
-        data.update(self._base_kwargs)
-        return data
-
+    def param_model_dump(self, *args, **kwargs):
+        dump = super().param_model_dump(*args, **kwargs)
+        dump.update(self._base_kwargs)
+        return dump
     def eval_func_name(self, allowed_funcs=None):
         if self._func is not None:
             return self._func
