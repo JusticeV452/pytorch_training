@@ -4,33 +4,100 @@ import importlib
 
 import operator as op
 
-from pydantic import BaseModel, ConfigDict, GetCoreSchemaHandler, Field, PrivateAttr, create_model, model_serializer
+from pydantic import BaseModel, ConfigDict, GetCoreSchemaHandler, Field, create_model
+from pydantic.fields import FieldInfo
 from pydantic_core import core_schema
 from torch import nn
-from typing import Any, Tuple, Callable
-from typing import Generic, TypeVar, Tuple, Callable, Any, Union
+from typing import get_args, get_origin
 
-ArgsT = TypeVar('ArgsT')
-ReturnT = TypeVar('ReturnT')
+from typing import Generic, Callable, Any, Union, Tuple, Type, TypeVar, overload, get_args, get_origin
+from utils import write_json, load_json, not_none
 
 PARAM_MAN_SER_PREFIX = "_ParamManager"
 
+
 def is_serialized_param_man(val) -> bool:
     return type(val) is dict and PARAM_MAN_SER_PREFIX in val
+
+
 def parse_serialized_param_man(val) -> dict:
     return val["config"]
-class AutoLambda(Generic[ArgsT, ReturnT]):
+
+
+Args = TypeVar("Args")
+Return = TypeVar("Return")
+
+class AutoLambda(Generic[Args, Return]):
+    """
+    Generic wrapper for Lambdas that auto-casts from string or callable.
+    AutoLambda[T] means:
+    - The callable itself must be T (if T is a type)
+    - Or it must return T (if T is not a type)
+    AutoLambda[[Args], Return] means:
+    - Callable taking Args, returning Return
+    """
+
+    @overload
+    def __class_getitem__(cls, item: Return) -> 'AutoLambda[Args, Return]': ...
+    
+    @overload
+    def __class_getitem__(cls, item: tuple[Args, Return]) -> 'AutoLambda[Args, Return]': ...
+
+    def __class_getitem__(cls, item):
+        if isinstance(item, tuple) and len(item) == 2:
+            return super().__class_getitem__(item)
+        else:
+            # Treat single argument as Return type
+            return super().__class_getitem__(((), item))
+
     @classmethod
     def __get_pydantic_core_schema__(cls, source_type, handler: GetCoreSchemaHandler):
+        expected_args = None
+        expected_return = None
+
+        if get_origin(source_type) is AutoLambda:
+            type_args = get_args(source_type)
+            if len(type_args) == 1:
+                expected_return = type_args[0]
+            elif len(type_args) == 2:
+                expected_args, expected_return = type_args
+            else:
+                raise TypeError(f"Unsupported AutoLambda type form: {type_args}")
+
         def validate(v):
-            if v is None or isinstance(v, Lambda):
-                return v
-            try:
-                if is_serialized_param_man(v):
-                    v = parse_serialized_param_man(v)
-                lam = Lambda(**v) if type(v) is dict else Lambda(v)
-            except Exception as e:
-                raise ValueError(f"'{v}' cannot be cast to Lambda") from e
+            if is_serialized_param_man(v):
+                v = parse_serialized_param_man(v)
+            if isinstance(v, Lambda):
+                lam = v
+            elif callable(v) or isinstance(v, str) or isinstance(v, dict):
+                try:
+                    lam = Lambda(**v) if type(v) is dict else Lambda(v)
+                except Exception as e:
+                    raise ValueError(f"Casting '{v}' to Lambda failed") from e
+            else:
+                raise ValueError(f"Cannot convert {v} to Lambda")
+            
+            func = lam.get_func()
+            if expected_return:
+                if isinstance(func, type):
+                    args = get_args(expected_return)
+                    if args and isinstance(args[0], type):
+                        target_cls = args[0]
+                    else:
+                        target_cls = expected_return
+
+
+                    if not isinstance(target_cls, type):
+                        raise TypeError(f"Expected a concrete type, got {target_cls}")
+                    if not issubclass(func, target_cls):
+                        raise ValueError(f"{func} must be a subclass of {target_cls}")
+                else:
+                    # func is callable, check return type
+                    dummy_args = [None] * (len(expected_args) if expected_args else 0)
+                    result = func(*dummy_args)
+                    if not isinstance(result, expected_return):
+                        raise ValueError(f"{func} must return {expected_return}, got {type(result)}")
+
             return lam
 
         return core_schema.no_info_plain_validator_function(validate)
@@ -54,6 +121,28 @@ def get_module_name(cls, shortest=True):
         shortest_path.append(next(module_parts))
 
     return f"{module_path}.{class_name}"
+
+
+def eval_obj_name(obj_name):
+    name_split = obj_name.rsplit('.', 1)
+    if len(name_split) == 1:
+        return globals()[name_split[0]]
+    module_path, *attrs, = name_split
+    while module_path:
+        try:
+            module = importlib.import_module(module_path)
+            break
+        except ModuleNotFoundError:
+            module_split = module_path.rsplit('.', 1)
+            module_path = module_split[0] if len(module_split) == 2 else ""
+            attrs.insert(0, module_split[-1])
+    if not module_path:
+        module = globals()[attrs[0]]
+        attrs = attrs[1:]
+    obj = module
+    for module_name in attrs:
+        obj = getattr(obj, module_name)
+    return obj
 
 
 class ParamManager:
@@ -123,25 +212,7 @@ class ModelComponent:
 
     @classmethod
     def eval_obj_name(cls, obj_name):
-        name_split = obj_name.rsplit('.', 1)
-        if len(name_split) == 1:
-            return globals()[name_split[0]]
-        module_path, *attrs, = name_split
-        while module_path:
-            try:
-                module = importlib.import_module(module_path)
-                break
-            except ModuleNotFoundError:
-                module_split = module_path.rsplit('.', 1)
-                module_path = module_split[0] if len(module_split) == 2 else ""
-                attrs.insert(0, module_split[-1])
-        if not module_path:
-            module = globals()[attrs[0]]
-            attrs = attrs[1:]
-        obj = module
-        for module_name in attrs:
-            obj = getattr(obj, module_name)
-        return obj
+        return eval_obj_name(obj_name)
 
     @classmethod
     def from_json(cls, json_el):
