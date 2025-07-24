@@ -148,16 +148,23 @@ def eval_obj_name(obj_name):
 class ParamManager:
     """Auto-validating parameter manager without BaseModel inheritance."""
 
-    def __init_subclass__(cls, **kwargs):
+    def __init_subclass__(cls, inherit_fields: bool = True, **kwargs):
         super().__init_subclass__(**kwargs)
 
         # Collect annotated fields and defaults
-        annotations = getattr(cls, '__annotations__', {})
-        defaults = {
-            k: getattr(cls, k)
-            for k in annotations.keys()
-            if hasattr(cls, k)
-        }
+        annotations = {}
+        defaults = {}
+        inherit_order = reversed(cls._PM_inherit_order()) if inherit_fields else [cls.__mro__[0]]
+
+        for base in inherit_order:
+            base_annotations = getattr(base, '__annotations__', {})
+            base_defaults = {
+                k: getattr(base, k)
+                for k in base_annotations
+                if hasattr(base, k)
+            }
+            annotations.update(base_annotations)
+            defaults.update(base_defaults)
 
         fields = {}
         for name, typ in annotations.items():
@@ -255,6 +262,10 @@ class ParamManager:
     def load_json(cls, inp):
         return cls.load_dict(json.loads(inp))
     
+    @classmethod
+    def _PM_inherit_order(cls):
+        return tuple(c for c in cls.__mro__ if issubclass(c, ParamManager))
+
 
 
 class SerializableModule(nn.Module, ParamManager):
