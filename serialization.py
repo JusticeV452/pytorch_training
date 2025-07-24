@@ -305,46 +305,6 @@ class SerializableModule(nn.Module, ParamManager):
         ParamManager.__init__(self, **kwargs)
 
 
-class ModelComponent:
-    def __init__(self, *args, **kwargs):
-        self.args = args
-        self.kwargs = kwargs
-
-    def rec_call(self, call_attr):
-        evaled_args = []
-        for arg in self.args:
-            if isinstance(arg, ModelComponent):
-                arg = getattr(arg, call_attr)()
-            evaled_args.append(arg)
-        evaled_kwargs = {}
-        for attr, val in self.kwargs.items():
-            if isinstance(val, ModelComponent):
-                val = getattr(val, call_attr)()
-            evaled_kwargs[attr] = val
-        return evaled_args, evaled_kwargs
-
-    @classmethod
-    def eval_obj_name(cls, obj_name):
-        return eval_obj_name(obj_name)
-
-    @classmethod
-    def from_json(cls, json_el):
-        def is_mc_json(el): return type(el) is dict and "__MCOBJECT__" in el
-        if is_mc_json(json_el):
-            obj_class = cls.eval_obj_name(json_el["__MCOBJECT__"])
-            parsed_params = {param: cls.from_json(
-                val) for param, val in json_el["params"].items()}
-            args = []
-            if "__ARGS__" in parsed_params:
-                args = parsed_params.pop("__ARGS__")
-            return obj_class(*args, **parsed_params)
-        elif isinstance(json_el, dict):
-            return {param: cls.from_json(val) for param, val in json_el.items()}
-        elif isinstance(json_el, list):
-            return [cls.from_json(el) for el in json_el]
-        return json_el
-
-
 class SafeEvaluator:
     """
     A safe expression evaluator that supports basic math and whitelisted function calls.
@@ -412,7 +372,7 @@ def is_param_man_json(val):
 # TODO: Add limited support for passing literal lambda objects (dill.source.getsource / inspect.getsource)
 # TODO: Allow nested calling (maybe provide sets of args, base_func(*args_set1)(*args_set2)...(*args_setn))
 # TODO: Refactor serialization into submodules with (_base/utils/_core/common).py for common functions
-class Lambda(ParamManager, ModelComponent):
+class Lambda(ParamManager):
     # """A ParamManager-wrapped Lambda that supports arbitrary call signatures."""
 
     func_name: str | Callable[..., Any] = Field(
@@ -490,20 +450,6 @@ class Lambda(ParamManager, ModelComponent):
     
     def get_func(self):
         return self.eval_func_name()
-
-    def to_json(self):
-        params = {
-            "func_name": self.func_name,
-            "arg_arity": self.arg_arity,
-            "func_caching_": self.func_caching_,
-            "call_on_eval_": self.call_on_eval_,
-            "ignore_args_": self.ignore_args_
-        }
-        params.update(self._base_kwargs)
-        return {
-            "__MCOBJECT__": self.__class__.__name__,
-            "params": params
-        }
 
     @classmethod
     def eval_str(cls, string):
