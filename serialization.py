@@ -390,6 +390,7 @@ class Lambda(ParamManager, ModelComponent):
                 assert len(param_list) == len(args), f"Expected {len(param_list)} arguments but got {len(args)}"
                 context = {var_name: arg for var_name, arg in zip(param_list, args)}
                 context.update({"nn": nn})
+                context.update(kwargs)
                 return SafeEvaluator(allowed_funcs=allowed_funcs).eval_expr(body_str, context=context)
             func = run_evaluator
         else:
@@ -398,6 +399,10 @@ class Lambda(ParamManager, ModelComponent):
         if self.func_caching_:
             self._func = func
         return func
+
+    
+    def get_func(self):
+        return self.eval_func_name()
 
     def to_json(self):
         params = {
