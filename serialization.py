@@ -159,15 +159,41 @@ class ParamManager:
             if hasattr(cls, k)
         }
 
+        fields = {}
+        for name, typ in annotations.items():
+            default = defaults.get(name, ...)
+            print("field_name:", name)
+
+            if isinstance(default, FieldInfo):
+                if default.default_factory is not None:
+                    # Call default_factory to get value
+                    default = default.default_factory()
+                elif default.default is not ...:
+                    default = default.default
+                else:
+                    default = ...
+
+            origin = get_origin(typ)
+            args = get_args(typ)
+            
+            def type_contains_Lambda(origin, args):
+                return origin is Union and AutoLambda in [get_origin(a) or a for a in args]
+
+            if (
+                (origin == AutoLambda and default is not ...)
+                or (type_contains_Lambda(origin, args) and callable(default))
+            ) and not isinstance(default, Lambda):
+                print(f"Wrapping '{default}' in Lambda")
+                default = Lambda(default)
+
+            fields[name] = (typ, default)
+
         # Auto-generate a Pydantic BaseModel for validation
         cls._schema = create_model(
             f"{cls.__name__}Schema",
             __base__=BaseModel,
             __config__=ConfigDict(extra="forbid", frozen=True),
-            **{
-                name: (typ, defaults.get(name, ...))
-                for name, typ in annotations.items()
-            }
+            **fields
         )
 
     def __init__(self, **kwargs):
