@@ -398,6 +398,14 @@ class SafeEvaluator:
         if name in self.allowed_funcs:
             return self.allowed_funcs[name]
         raise NameError(f"Function '{name}' is not allowed")
+    
+
+def is_param_man_json(val):
+    return (
+        type(val) is str
+        and PARAM_MAN_SER_PREFIX in val
+        and PARAM_MAN_SER_PREFIX in json.loads(val)
+    )
 
 
 # TODO: Remove arg_arity (make arity property base on passed kwargs and func kwargs)
@@ -425,8 +433,6 @@ class Lambda(ParamManager, ModelComponent):
 
     def __init__(self, func_name, arg_arity=(0, -1), func_caching_=True,
                  call_on_eval_=False, ignore_args_=False, **kwargs):
-        # Convert positional args to keyword args for Pydantic
-        func_name = func_name if isinstance(func_name, str) else get_module_name(func_name)
         func_name_callable = callable(func_name)
         assert func_name_callable or isinstance(func_name, str), f"'{func_name}' must be str or callable."
         if func_name_callable and ("<function <lambda>" in str(func_name) or ".<locals>." in str(func_name)):
@@ -434,7 +440,15 @@ class Lambda(ParamManager, ModelComponent):
                 "Callables like lambda functions or locally defined functions are not supported. "
                 "Use a fully-qualified importable function or class (e.g., 'torch.nn.ReLU')."
             )
-        
+        cached_func = None
+        if func_name_callable:
+            cached_func = func_name
+            func_name = (
+                cached_func.model_dump_json()
+                if isinstance(cached_func, ParamManager)
+                else get_module_name(func_name)
+            )
+
         if isinstance(arg_arity, int):
             arg_arity = (0, -1) if arg_arity == -1 else (arg_arity, arg_arity)
 
@@ -446,7 +460,7 @@ class Lambda(ParamManager, ModelComponent):
             ignore_args_=ignore_args_,
         )
         self._base_kwargs = kwargs
-        self._func = None if isinstance(func_name, str) or not func_caching_ else func_name
+        self._func = cached_func if func_caching_ else None
         assert self._func is None or func_name_callable, f"'{func_name}' is not callable."
 
     def param_model_dump(self, *args, **kwargs):
@@ -465,6 +479,8 @@ class Lambda(ParamManager, ModelComponent):
                 context.update(kwargs)
                 return SafeEvaluator(allowed_funcs=allowed_funcs).eval_expr(body_str, context=context)
             func = run_evaluator
+        elif is_param_man_json(self.func_name):
+            func = ParamManager.load_json(self.func_name)
         else:
             func = self.eval_obj_name(self.func_name)
         assert callable(func), f"'{func}' is not callable."
