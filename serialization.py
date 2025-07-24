@@ -578,3 +578,28 @@ class Lambda(ParamManager, ModelComponent):
             )
         func = self.eval_func_name()
         return func(*args, **self._base_kwargs, **kwargs)
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler: GetCoreSchemaHandler):
+
+        def validate(v):
+            if is_serialized_param_man(v):
+                v = parse_serialized_param_man(v)
+            if isinstance(v, cls):
+                lam = v
+            elif callable(v) or isinstance(v, str) or isinstance(v, dict):
+                try:
+                    lam = cls(**v) if type(v) is dict else cls(v)
+                except Exception as e:
+                    raise ValueError(f"Casting '{v}' to {cls.__name__} failed") from e
+            else:
+                raise ValueError(f"Cannot convert {v} to {cls.__name__}")
+
+            return lam
+
+        return core_schema.no_info_plain_validator_function(validate)
+
+    @classmethod
+    def _PM_auto_cast(cls, obj):
+        return cls(obj)
+    
