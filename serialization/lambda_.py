@@ -326,27 +326,34 @@ class AutoLambda(Generic[Args, Return]):
 
         def validate(v):
             lam = cls._PM_auto_cast(v)
-
-            if expected_return:
+            func = None
+            if expected_args or expected_return:
                 func = lam.get_func()
-                if isinstance(func, type):
-                    args = get_args(expected_return)
-                    if args and isinstance(args[0], type):
-                        target_cls = args[0]
-                    else:
-                        target_cls = expected_return
 
-                    if not isinstance(target_cls, type):
-                        raise TypeError(f"Expected a concrete type, got {target_cls}")
-                    if not issubclass(func, target_cls):
-                        raise ValueError(f"{func} must be a subclass of {target_cls}")
-                else:
-                    # func is callable, check return type
-                    dummy_args = [None] * (len(expected_args) if expected_args else 0)
-                    result = func(*dummy_args)
-                    if not isinstance(result, expected_return):
-                        raise ValueError(f"{func} must return {expected_return}, got {type(result)}")
-
+            if expected_args:
+                sig_params = inspect.signature(func).parameters.values()
+                if len(sig_params) != len(expected_args):
+                    raise TypeError(
+                        f"{func} takes {len(sig_params)} args, "
+                        f"but {len(expected_args)} expected"
+                    )
+                for _, (param, expected_type) in enumerate(zip(sig_params, expected_args)):
+                    annotated = hints.get(param.name, None)
+                    if not annotated or annotated == expected_type:
+                        continue
+                    raise TypeError(
+                        f"Parameter '{param.name}' of {func} is annotated as {annotated}, "
+                        f"but {expected_type} is expected"
+                    )
+            if expected_return:
+                # Use func annotation for return type checking
+                hints = get_type_hints(func)
+                return_type = hints.get("return", None)
+                if return_type and return_type != expected_return:
+                    raise TypeError(
+                        f"{func} is annotated to return {return_type}, "
+                        f"but {expected_return} is expected"
+                    )
             return lam
 
         return core_schema.no_info_plain_validator_function(validate)
