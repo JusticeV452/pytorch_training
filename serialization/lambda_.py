@@ -105,6 +105,12 @@ class Lambda(ParamManager):
                 "Callables like lambda functions or locally defined functions are not supported. "
                 "Use a fully-qualified importable function or class (e.g., 'torch.nn.ReLU')."
             )
+        
+        # Check if str is lambda str that calls a function with args/kwargs
+        if (arg_extract := self.extract_init_args(func_name)):
+            func_name, base_kwargs = arg_extract
+            kwargs = dict(base_kwargs, **kwargs)
+
         cached_func = None
         if func_name_callable:
             cached_func = func_name if not parent_kwargs_ else None
@@ -170,25 +176,21 @@ class Lambda(ParamManager):
         ], body_str.strip()
 
     @classmethod
-    def parse(cls, lambda_str):
-        cls_name = cls.__name__
-        lambda_tag_len = len(cls_name)
-        assert lambda_str[:lambda_tag_len] == cls_name.lower()
-        arg_str_list, body_str = cls.split_lambda_str(lambda_str)
-        if arg_str_list and arg_str_list[-1] == "**kwargs":
-            arg_str_list.pop(-1)
-        arbitrary_max = False
-        if arg_str_list and arg_str_list[-1] == "*args":
-            arg_str_list.pop(-1)
-            arbitrary_max = True
-        min_args = len(arg_str_list)
-        max_args = -1 if arbitrary_max else min_args
-        func_name, param_str = body_str.split('(')
-        base_kwargs = {}
-        for arg_pair in re.findall(r"[a-zA-Z.0-9]+=[a-zA-Z.0-9]+", param_str):
-            arg_name, val_str = arg_pair.split('=', 1)
-            base_kwargs[arg_name] = eval_str(val_str)
-        return Lambda(func_name.strip(' '), (min_args, max_args), **base_kwargs)
+    def extract_init_args(cls, lambda_str: str):
+        try:
+            assert type(lambda_str) is str
+            cls_name = cls.__name__
+            lambda_tag_len = len(cls_name)
+            assert lambda_str[:lambda_tag_len].lower() == "lambda"
+            _, body_str = cls.split_lambda_str(lambda_str)
+            func_name, param_str = body_str.split('(')
+            base_kwargs = {
+                arg_name: eval_str(val_str)
+                for arg_name, val_str in re.findall(r"(\w+)\s*=\s*([^,)]+)", param_str)
+            }
+            return func_name.strip(), base_kwargs
+        except:
+            return None
 
     def __str__(self):
         min_args, max_args = self.arity
