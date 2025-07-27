@@ -1,7 +1,7 @@
 import ast
+import functools
 import inspect
 import json
-import functools
 import re
 
 from typing import (
@@ -67,6 +67,13 @@ def get_arity(func):
     if has_var_args:
         max_args = -1  # Indicates unbounded args
     return min_args, max_args
+
+
+def eval_str(string):
+    try:
+        return ast.literal_eval(string)
+    except:
+        return globals()[string]
 
 
 # TODO: Remove arg_arity (make arity property base on passed kwargs and func kwargs)
@@ -149,17 +156,10 @@ class Lambda(ParamManager):
         if self.func_caching_:
             self._func = func
         return func
-    
+
     def get_func(self):
         return self.eval_func_name()
-
-    @classmethod
-    def eval_str(cls, string):
-        try:
-            return ast.literal_eval(string)
-        except:
-            return globals()[string]
-        
+ 
     @classmethod
     def split_lambda_str(cls, lambda_str):
         arg_str, body_str = lambda_str[len("lambda"):].strip(' ').split(':')
@@ -183,7 +183,7 @@ class Lambda(ParamManager):
         base_kwargs = {}
         for arg_pair in re.findall(r"[a-zA-Z.0-9]+=[a-zA-Z.0-9]+", param_str):
             arg_name, val_str = arg_pair.split('=', 1)
-            base_kwargs[arg_name] = cls.eval_str(val_str)
+            base_kwargs[arg_name] = eval_str(val_str)
         return Lambda(func_name.strip(' '), (min_args, max_args), **base_kwargs)
 
     def __str__(self):
@@ -298,10 +298,10 @@ class AutoLambda(Generic[Args, Return]):
     """
 
     @overload
-    def __class_getitem__(cls, item: Return) -> 'AutoLambda[Args, Return]': ...
+    def __class_getitem__(cls, item: Return) -> "AutoLambda[Args, Return]": ...
     
     @overload
-    def __class_getitem__(cls, item: tuple[Args, Return]) -> 'AutoLambda[Args, Return]': ...
+    def __class_getitem__(cls, item: tuple[Args, Return]) -> "AutoLambda[Args, Return]": ...
 
     def __class_getitem__(cls, item):
         if isinstance(item, tuple) and len(item) == 2:
