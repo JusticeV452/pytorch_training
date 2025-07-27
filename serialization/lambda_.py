@@ -43,7 +43,7 @@ def get_arity(func):
     # If it's a callable object, get its __call__
     if not inspect.isfunction(func) and not inspect.ismethod(func):
         if isinstance(func, Lambda):
-            return get_arity(func.eval_func_name())
+            return func.arity
         if isinstance(func, nn.Module):
             func = func.forward
         elif hasattr(func, "__call__"):
@@ -58,8 +58,7 @@ def get_arity(func):
 
     for param in sig.parameters.values():
         if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD):
-            if param.default is param.empty:
-                min_args += 1
+            min_args += int(param.default is param.empty)
             max_args += 1
         elif param.kind == param.VAR_POSITIONAL:
             has_var_args = True
@@ -87,14 +86,8 @@ class Lambda(ParamManager):
     func_name: str | Callable[..., Any] = Field(
         ..., description="Function name as import path or callable."
     )
-    arg_arity: Tuple[int, int] | int = Field(
-        (0, -1), description="Min and max number of arguments."
-    )
     func_caching_: bool = Field(
         True, description="Cache the resolved function after first evaluation."
-    )
-    call_on_eval_: bool = Field(
-        False, description="Call the function on eval() instead of returning self."
     )
     ignore_args_: bool = Field(
         False, description="Ignore *args when called."
@@ -104,8 +97,7 @@ class Lambda(ParamManager):
         "the top-level function given (func_name(**parent_kwargs[0])...(**parent_kwargs[n])...(**kwargs))"
     )
 
-    def __init__(self, func_name, arg_arity=(0, -1), func_caching_=True,
-                 call_on_eval_=False, ignore_args_=False, parent_kwargs_=None, **kwargs):
+    def __init__(self, func_name, func_caching_=True, ignore_args_=False, parent_kwargs_=None, **kwargs):
         func_name_callable = callable(func_name)
         assert func_name_callable or isinstance(func_name, str), f"'{func_name}' must be str or callable."
         if func_name_callable and ("<function <lambda>" in str(func_name) or ".<locals>." in str(func_name)):
@@ -122,22 +114,17 @@ class Lambda(ParamManager):
                 else get_module_name(func_name)
             )
 
-        if isinstance(arg_arity, int):
-            arg_arity = (0, -1) if arg_arity == -1 else (arg_arity, arg_arity)
         if isinstance(parent_kwargs_, dict):
             parent_kwargs_ = [parent_kwargs_]
 
         super().__init__(
             func_name=func_name,
-            arg_arity=arg_arity,
             func_caching_=func_caching_,
-            call_on_eval_=call_on_eval_,
             ignore_args_=ignore_args_,
             parent_kwargs_=parent_kwargs_
         )
         self._base_kwargs = kwargs
         self._func = cached_func if func_caching_ else None
-        assert self._func is None or func_name_callable, f"'{func_name}' is not callable."
 
     def param_model_dump(self, *args, **kwargs):
         dump = super().param_model_dump(*args, **kwargs)
@@ -169,11 +156,18 @@ class Lambda(ParamManager):
 
     def get_func(self):
         return self.eval_func_name()
+    
+    @property
+    def arity(self):
+        return get_arity(self.get_func())
  
     @classmethod
     def split_lambda_str(cls, lambda_str):
-        arg_str, body_str = lambda_str[len("lambda"):].strip(' ').split(':')
-        return [arg.strip(' ') for arg in arg_str.split(',') if arg.strip(' ')], body_str.strip(' ')
+        arg_str, body_str = lambda_str[len("lambda"):].strip().split(':')
+        return [
+            stripped_arg for arg in arg_str.split(',')
+            if (stripped_arg := arg.strip())
+        ], body_str.strip()
 
     @classmethod
     def parse(cls, lambda_str):
@@ -197,7 +191,7 @@ class Lambda(ParamManager):
         return Lambda(func_name.strip(' '), (min_args, max_args), **base_kwargs)
 
     def __str__(self):
-        min_args, max_args = self.arg_arity
+        min_args, max_args = self.arity
         req_args = ', '.join([f"a{i}" for i in range(min_args)])
         star_args = ""
         if max_args == -1:
@@ -221,20 +215,11 @@ class Lambda(ParamManager):
         str_rep += "**kwargs)"
         return str_rep
 
-    def eval(self):
-        return self() if self.call_on_eval_ else self
-
     def __call__(self, *args, **kwargs):
         if self.ignore_args_:
             args = []
-        else:
-            assert len(args) >= self.arg_arity[0], (
-                f"Not enough args: expected at least {self.arg_arity[0]}, got {len(args)}"
-            )
-            assert (self.arg_arity[1] == -1 or len(args) <= self.arg_arity[1]), (
-                f"Too many args: expected at most {self.arg_arity[1]}, got {len(args)}"
-            )
         func = self.eval_func_name()
+        # TODO: Remove args passed through *args from _base_kwargs before calling ?
         return func(*args, **self._base_kwargs, **kwargs)
 
     @classmethod
@@ -266,9 +251,7 @@ class FuncWrapper(Lambda):
     def __init__(self, func):
         super().__init__(
             func_name=func,
-            arg_arity=-1,
             func_caching_=True,
-            call_on_eval_=False,
             ignore_args_=False
         )
     def __call__(self, *args, **kwargs):
