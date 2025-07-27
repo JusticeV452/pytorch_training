@@ -5,8 +5,8 @@ import json
 import re
 
 from typing import (
-    Any, Callable, Generic, Tuple, Type, TypeVar, Union,
-    get_args, get_origin, overload
+    Any, Callable, Dict, Generic, Optional, Sequence, Type, TypeVar, Union,
+    get_args, get_origin, get_type_hints, overload
 )
 from pydantic import GetCoreSchemaHandler, Field
 from pydantic_core import core_schema
@@ -78,7 +78,8 @@ def eval_str(string):
 
 # TODO: Remove arg_arity (make arity property base on passed kwargs and func kwargs)
 # TODO: Add limited support for passing literal lambda objects (dill.source.getsource / inspect.getsource)
-# TODO: Allow nested calling (maybe provide sets of args, base_func(*args_set1)(*args_set2)...(*args_setn))
+# TODO: Change save format to something like {"_PrmMn": (type, config)} (make less verbose)
+# TODO: Change AutoLambda to validate func result type using function annotation (if there enforce, else do nothing)
 # XTODO: Instead of force casting when passed, just cast when saving
 class Lambda(ParamManager):
     # """A ParamManager-wrapped Lambda that supports arbitrary call signatures."""
@@ -98,9 +99,13 @@ class Lambda(ParamManager):
     ignore_args_: bool = Field(
         False, description="Ignore *args when called."
     )
+    parent_kwargs_: Optional[Sequence[Dict]] = Field(
+        None, description="List of keyword arguments (dicts) used to evaluate function(s) returned by "
+        "the top-level function given (func_name(**parent_kwargs[0])...(**parent_kwargs[n])...(**kwargs))"
+    )
 
     def __init__(self, func_name, arg_arity=(0, -1), func_caching_=True,
-                 call_on_eval_=False, ignore_args_=False, **kwargs):
+                 call_on_eval_=False, ignore_args_=False, parent_kwargs_=None, **kwargs):
         func_name_callable = callable(func_name)
         assert func_name_callable or isinstance(func_name, str), f"'{func_name}' must be str or callable."
         if func_name_callable and ("<function <lambda>" in str(func_name) or ".<locals>." in str(func_name)):
@@ -110,7 +115,7 @@ class Lambda(ParamManager):
             )
         cached_func = None
         if func_name_callable:
-            cached_func = func_name
+            cached_func = func_name if not parent_kwargs_ else None
             func_name = (
                 cached_func.model_dump_json()
                 if isinstance(cached_func, ParamManager)
@@ -119,6 +124,8 @@ class Lambda(ParamManager):
 
         if isinstance(arg_arity, int):
             arg_arity = (0, -1) if arg_arity == -1 else (arg_arity, arg_arity)
+        if isinstance(parent_kwargs_, dict):
+            parent_kwargs_ = [parent_kwargs_]
 
         super().__init__(
             func_name=func_name,
@@ -126,6 +133,7 @@ class Lambda(ParamManager):
             func_caching_=func_caching_,
             call_on_eval_=call_on_eval_,
             ignore_args_=ignore_args_,
+            parent_kwargs_=parent_kwargs_
         )
         self._base_kwargs = kwargs
         self._func = cached_func if func_caching_ else None
@@ -153,6 +161,8 @@ class Lambda(ParamManager):
         else:
             func = eval_obj_name(self.func_name)
         assert callable(func), f"'{func}' is not callable."
+        for parent_kwargs in self.parent_kwargs_:
+            func = func(**parent_kwargs)
         if self.func_caching_:
             self._func = func
         return func
