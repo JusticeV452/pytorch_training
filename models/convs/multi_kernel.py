@@ -1,6 +1,6 @@
 import torch
 
-from typing import Any, List, Optional, Tuple, Type, Union
+from typing import List, Optional, Tuple, Union
 from pydantic import Field
 from torch import nn
 from torch.nn.utils.parametrizations import spectral_norm as torch_spectral_norm
@@ -23,7 +23,7 @@ class MultiKernelConv(SerializableModule):
     groups: int = Field(1, description="Number of blocked connections.")
     bias: bool = Field(True, description="If True, adds a learnable bias.")
     padding_mode: str = Field("zeros", description="Padding mode: 'zeros', 'reflect', etc.")
-    conv_type: AutoLambda[Type[nn.Module]] = Field(nn.Conv2d, description="Convolution type (default nn.Conv2d).")
+    conv_type: AutoLambda[nn.Module] = Field(nn.Conv2d, description="Convolution type (default nn.Conv2d).")
     spectral_norm: bool = Field(False, description="Apply spectral normalization to layers.")
     device: Optional[torch.device] = Field(None, description="Device for tensor allocation.")
     dtype: Optional[torch.dtype] = Field(None, description="Data type for tensors.")
