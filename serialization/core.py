@@ -48,6 +48,8 @@ def eval_obj_name(obj_name):
     if len(name_split) == 1:
         return globals()[name_split[0]]
     module_path, *attrs, = name_split
+    if module_path == "nn":
+        module_path = "torch.nn"
     while module_path:
         try:
             module = importlib.import_module(module_path)
