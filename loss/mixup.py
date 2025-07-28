@@ -10,6 +10,7 @@ def mixup_data(real, fake, alpha=0.4):
     mixed = lam * real + (1 - lam) * fake
     return mixed, lam
 
+
 def mixup_bce(pred, lam):
     real_labels = torch.ones(pred.shape[0], 1, device=pred.device, dtype=pred.dtype)
     fake_labels = torch.zeros(pred.shape[0], 1, device=pred.device, dtype=pred.dtype)

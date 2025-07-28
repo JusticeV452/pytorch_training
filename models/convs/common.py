@@ -5,11 +5,11 @@ import torch.nn.functional as F
 from pydantic import Field
 from torch import nn
 from torch.utils.checkpoint import checkpoint_sequential
-from typing import Optional, Tuple, Type, Union
+from typing import Optional, Union
 
 from components.common import SEBlock
 from models.convs.dynamic import FILTER_TYPES, DynamicConv2d_v2
-from serialization import SerializableModule, Lambda, AutoLambda
+from serialization import SerializableModule, AutoLambda, Lambda
 from utils import not_none
 
 
@@ -21,25 +21,25 @@ class ConvLayer(SerializableModule):
     )
     kernel_size: int = Field(3, description="Kernel size for convolutions")
     num_convs: int = Field(2, description="Number of convolution layers")
-    norm_layer: Optional[AutoLambda[Tuple[int], nn.Module]] = Field(
+    norm_layer: Optional[AutoLambda[nn.Module]] = Field(
         nn.BatchNorm2d, description="Normalization layer class"
     )
-    activ_type: AutoLambda[Tuple[()], nn.Module] = Field(
+    activ_type: AutoLambda[nn.Module] = Field(
         Lambda(nn.ReLU, inplace=True),
         description="Activation function factory"
     )
-    conv_type: Type[nn.Module] = Field(
+    conv_type: AutoLambda[nn.Module] = Field(
         nn.Conv2d, description="Convolution layer class"
     )
-    residual_cfg: Optional[Union[str, dict, float, int, AutoLambda[Tuple[()], torch.Tensor]]] = Field(
+    residual_cfg: Optional[Union[str, dict, float, int, AutoLambda]] = Field(
         None, description="Residual connection type or configuration"
     )
     use_bias: bool = Field(False, description="Whether to use bias in convolutions")
     use_checkpointing: bool = Field(False, description="Enable checkpointing for convolutions")
-    filter_gen: Optional[Type[nn.Module]] = Field(
-        None, description="Filter generator class used if dynamic convultion is enabled"
+    filter_gen: Optional[AutoLambda[nn.Module]] = Field(
+        None, description="Filter generator class used if dynamic convolution is enabled"
     )
-    se_param: Optional[Union[int, AutoLambda[Tuple[()], nn.Module]]] = Field(
+    se_param: Optional[Union[int, AutoLambda[nn.Module]]] = Field(
         None, description="Int: acts as reduction_ratio for SEBlock, func: factory for se block"
     )
 
@@ -70,7 +70,7 @@ class ConvLayer(SerializableModule):
             self.residual_transform = lambda result, inp: result + self.residual(inp)
         elif type(residual_cfg) in [float, int]:
             self.residual_type = "constant"
-            self.residual = nn.Parameter(torch.full((1,), residual_cfg)[0])
+            self.residual = nn.Parameter(torch.full((1,), float(residual_cfg))[0])
             self.residual_transform = lambda result, inp: result + self.residual * inp
         elif not_none(residual_cfg) and "pad" in residual_cfg:
             self.residual_type = residual_cfg
