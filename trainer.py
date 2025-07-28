@@ -13,7 +13,7 @@ import torchvision.transforms.functional as TF
 
 from datetime import datetime
 from pydantic import Field
-from typing import Optional, List, Any, Callable, Type
+from typing import Optional, List, Any, Tuple, Type
 from torch.utils.data import DataLoader
 from torch.utils.data.dataloader import RandomSampler
 
@@ -25,7 +25,7 @@ from loss.mixup import mixup_data, mixup_bce
 from pruning import FineGrainedPruner, DummyPruner
 from utils import calc_model_size, count_parameters, percent_chance, not_none, shuffle_tensor
 from sampling import RandResBatchSampler
-from serialization import ParamManager, Lambda
+from serialization import ParamManager, Lambda, AutoLambda
 
 # Flag
 use_multiprocess = True
@@ -86,9 +86,8 @@ class ModelTrainer(ParamManager):
     use_checkpointing: bool = Field(False, description="Enable checkpointing")
     grad_acc_size: int = Field(1, description="Gradient accumulation steps")
     dtype: torch.dtype = Field(torch.float32, description="Data type for tensors")
-    loss_func: Callable = Field(..., description="Loss function")
-    reg_func: Callable[[torch.nn.Module], float] = Field(
-        default=lambda model: 0,
+    loss_func: AutoLambda = Field(..., description="Loss function")
+    reg_func: AutoLambda[Tuple[torch.nn.Module], float] = Field(
         default=Lambda("lambda model: 0"),
         description="Regularization function"
     )
@@ -97,7 +96,7 @@ class ModelTrainer(ParamManager):
         None,
         description="Optional sparsity configuration dictionary"
     )
-    scheduler_maker: Optional[Callable[[torch.optim.Optimizer]]] = Field(
+    scheduler_maker: Optional[AutoLambda[Tuple[torch.optim.Optimizer], torch.optim.lr_scheduler.LRScheduler]] = Field(
         None,
         description="Learning rate scheduler (optional)"
     )
@@ -107,7 +106,7 @@ class ModelTrainer(ParamManager):
     new_save_format: bool = Field(True, description="Use new save format for models")
     batch_norm_acc: bool = Field(False, description="Enable batch norm accumulation")
     load_optim: bool = Field(True, description="Load optimizer state from checkpoint")
-    diversity_loss_func: Optional[Callable] = Field(
+    diversity_loss_func: Optional[AutoLambda] = Field(
         None,
         description="Optional diversity loss function"
     )
