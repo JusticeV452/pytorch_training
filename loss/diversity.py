@@ -1,9 +1,13 @@
 import torch
 import torch.nn.functional as F
 
+from pydantic import Field
 from torch import nn
 from torchmetrics.image.kid import KernelInceptionDistance
 from torch_fidelity import calculate_metrics
+from typing import Tuple
+
+from serialization import ParamManager, Lambda, AutoLambda, LambdaModuleT
 from utils import channel_width_flatten
 
 
@@ -148,15 +152,27 @@ DIVERSITY_FUNCS = {
 }
 
 
-class FeatureDiversityLoss:
-    """ Computes and accumulates diversity loss for intermediate feature maps using hooks. """
+class FeatureDiversityLoss(ParamManager):
+    """
+    Computes and accumulates diversity loss for intermediate feature maps using hooks.
+    """
 
-    def __init__(self, loss_fn=orthogonality_loss, alpha=0.1, to_hook=(nn.Conv2d, nn.BatchNorm2d)):
-        self.loss_fn = loss_fn
-        self.alpha = alpha  # Weighting factor
+    loss_fn: AutoLambda[Tuple[torch.Tensor], torch.Tensor] = Field(
+        Lambda(orthogonality_loss),
+        description="Callable loss function applied to feature maps."
+    )
+    alpha: float = Field(
+        0.1, description="Weighting factor for diversity loss accumulation."
+    )
+    to_hook: Tuple[LambdaModuleT, ...] = Field(
+        (nn.Conv2d, nn.BatchNorm2d),
+        description="Layer types to register forward hooks on."
+    )
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self.loss = 0  # Accumulated loss
         self.hooks = []  # Stores hook handles
-        self.to_hook = to_hook
         self.samples = 0
 
     def hook_layer(self, layer):
