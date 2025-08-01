@@ -12,6 +12,7 @@ from pydantic import GetCoreSchemaHandler, Field
 from pydantic_core import core_schema
 from torch import nn
 
+from utils import not_none
 from .core import (
     PARAM_MAN_SER_PREFIX, ParamManager, SafeEvaluator,
     eval_obj_name, get_module_name, is_serialized_param_man,
@@ -113,7 +114,7 @@ class Lambda(ParamManager):
 
         cached_func = None
         if func_name_callable:
-            cached_func = func_name if not parent_kwargs_ else None
+            cached_func = None if not_none(parent_kwargs_) else func_name
             func_name = (
                 cached_func.model_dump_json()
                 if isinstance(cached_func, ParamManager)
@@ -154,8 +155,9 @@ class Lambda(ParamManager):
         else:
             func = eval_obj_name(self.func_name)
         assert callable(func), f"'{func}' is not callable."
-        for parent_kwargs in self.parent_kwargs_:
-            func = func(**parent_kwargs)
+        if not_none(self.parent_kwargs_):
+            for parent_kwargs in self.parent_kwargs_:
+                func = func(**parent_kwargs)
         if self.func_caching_:
             self._func = func
         return func
