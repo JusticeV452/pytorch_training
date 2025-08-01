@@ -7,7 +7,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint_sequential
 from typing import Optional, Union
 
-from components.common import SEBlock
+from models.components import SEBlock
 from models.convs.dynamic import FILTER_TYPES, DynamicConv2d_v2
 from serialization import SerializableModule, AutoLambda, Lambda
 from utils import not_none
