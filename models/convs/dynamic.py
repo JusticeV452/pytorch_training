@@ -1,10 +1,97 @@
+import torch
 import torch.nn.functional as F
 
+from typing import Optional
 from pydantic import Field
 from torch import nn
 
+from models.components import SEBlock
 from serialization import SerializableModule, AutoLambda
-from utils import int_round, parse_filter_size
+from utils import int_round, next_largest_dividend, parse_filter_size
+
+
+def split_into_patches(x, P):
+    """
+    Splits a tensor of shape (N, C, H, W) into patches with different numbers of patches
+    along the height and width axes, padding as necessary.
+
+    Args:
+        x (torch.Tensor): Input tensor of shape (N, C, H, W).
+        P_H (int): Number of patches along the height axis.
+        P_W (int): Number of patches along the width axis.
+
+    Returns:
+        torch.Tensor: Output tensor of shape (N, P_H * P_W, C, PY, PX).
+    """
+    *_, H, W = x.shape
+    P_H, P_W = P if isinstance(P, tuple | list) else (P, P)
+
+    # Calculate patch sizes (PY, PX)
+    PY = (H + P_H - 1) // P_H  # Ceiling division for height
+    PX = (W + P_W - 1) // P_W  # Ceiling division for width
+
+    # Calculate necessary padding
+    pad_h = (PY * P_H - H)
+    pad_w = (PX * P_W - W)
+    x_padded = x
+    if pad_h > 0 or pad_w > 0:
+        padding = (0, pad_w, 0, pad_h)  # (left, right, top, bottom)
+        # Pad the input tensor
+        x_padded = F.pad(x, padding)
+
+    orig_device = x.device
+    # orig_device != "cpu" and (x_padded.shape[-2] > 256 or x_padded.shape[-3] > 256)
+    cpu_offload = False
+    if cpu_offload:
+        x = x.cpu()
+
+    # Split the tensor into patches
+    patches = x_padded.unfold(2, PY, PY).unfold(3, PX, PX)  # (N, C, P_H, P_W, PY, PX)
+
+    # Reshape and permute to get (N, P_H * P_W, C, PY, PX)
+    patches = patches.permute(0, 2, 3, 1, 4, 5)
+    # Combine patch indices into one dimension (N, P_H * P_W, C, PY, PX)
+    patches = patches.flatten(1, 2)
+    if cpu_offload:
+        patches = patches.to(device=orig_device)
+
+    return patches
+
+
+class PatchSplit(nn.Module):
+    def __init__(self, grid_size, flatten_channels=True):
+        super().__init__()
+        self.grid_size = grid_size
+        self.flatten_channels = flatten_channels
+
+    def forward(self, x):
+        patches = split_into_patches(x, self.grid_size)
+        if self.flatten_channels:
+            patches = patches.flatten(1, 2)
+        return patches
+
+
+class NoParamBilinear(nn.Module):
+    def __init__(self, h, w, align_corners=False):
+        super().__init__()
+        self.align_corners = align_corners
+        self.output_shape = (h, w)
+
+    def forward(self, x):
+        return F.interpolate(
+            x, size=self.output_shape,
+            mode="bilinear", align_corners=self.align_corners
+        )
+
+
+class SpatialFC(nn.Module):
+    def __init__(self, h, w):
+        super().__init__()
+        self.fc = nn.Linear(h * w, h * w)
+
+    def forward(self, x):
+        *_, H, W = x.shape
+        return self.fc(x.view(*_, H * W)).view(*_, H, W)
 
 
 class FilterGen(SerializableModule):
@@ -69,6 +156,173 @@ class FCFilterGen(FilterGen):
         return self.backbone(x)
 
 
+class MatmulConvFilterGen(FilterGen):
+    filt_kernel_size: int | tuple[int, int] = Field(
+        3, description="Kernel size used in internal filter generation convolutions"
+    )
+    zero_pad: bool = Field(
+        False, description="If True, uses padding to maintain resolution in internal convolutions"
+    )
+    use_in_conv: bool = Field(True, description="Whether to apply a pre-filter convolution on the input")
+
+    def __init__(self, in_channels, out_channels, kernel_size, **kwargs):
+        filt_kernel_size = parse_filter_size(filt_kernel_size)
+        super().__init__(
+            in_channels=in_channels, out_channels=out_channels,
+            kernel_size=kernel_size, **kwargs
+        )
+        zero_pad = self.zero_pad
+        self.in_conv = nn.Conv2d(
+            in_channels, in_channels,
+            kernel_size=filt_kernel_size,
+            padding=tuple(filt_kernel_size[i] // 2 for i in range(2)) if zero_pad else 0,
+        ) if self.use_in_conv else lambda x: x
+        self.out_conv = nn.Conv2d(
+            in_channels, out_channels,
+            kernel_size=filt_kernel_size,
+            padding=tuple(filt_kernel_size[i] // 2 for i in range(2)) if zero_pad else 0,
+        )
+        self.downsample_pad = [
+            0 if zero_pad else filt_kernel_size[i] - 1 for i in range(2)
+        ]
+
+    def weight_gen(self, x):
+        x = F.interpolate(
+            x, size=(
+                self.fy +
+                self.downsample_pad[0], self.fx + self.downsample_pad[1]
+            ),
+            mode="bilinear", align_corners=False
+        )
+        in_conv_inp = x
+        if not self.use_in_conv and any(self.downsample_pad):
+            # Need to make in_conv input expected size if not using convolution
+            in_conv_inp = F.interpolate(
+                x, size=(self.fy, self.fx),
+                mode="bilinear", align_corners=False
+            )
+        N, C, *_, = x.shape
+        in_conv_result = self.in_conv(in_conv_inp)
+        return torch.matmul(
+            in_conv_result.view(N, self.fy, self.fx, C, 1),
+            self.out_conv(x).view(N, self.fy, self.fx, 1, self.out_channels)
+        )
+
+
+class BottleneckConvFilterGen(FilterGen):
+    filt_kernel_size: int | tuple[int, int] = Field(3, description="Internal filter kernel size")
+    bneck_div: int = Field(16, description="Bottleneck channel division factor")
+    zero_pad: bool = Field(False, description="Whether to use zero padding")
+    se_div: int = Field(4, description="Squeeze-excitation reduction ratio (0 disables SE block)")
+    bneck_groups: int = Field(1, description="Groups for bottleneck input conv")
+    inv_bneck_groups: int = Field(1, description="Groups for bottleneck output conv")
+    bneck_channel_div: int = Field(1, description="Ensure bottleneck channels divisible by this")
+    bneck_activ: Optional[AutoLambda[nn.Module]] = Field(None, description="Activation after bottleneck input conv")
+    activ: Optional[AutoLambda[nn.Module]] = Field(None, description="Activation after bottleneck mid conv")
+    hidden_fc: bool = Field(False, description="Whether to apply spatial fully-connected layer")
+
+    def __init__(self, in_channels, out_channels, kernel_size, **kwargs):
+        if filt_kernel_size := kwargs.get("filt_kernel_size"):
+            filt_kernel_size = parse_filter_size(filt_kernel_size)
+            kwargs["filt_kernel_size"] = filt_kernel_size
+        super().__init__(
+            in_channels=in_channels, out_channels=out_channels,
+            kernel_size=kernel_size, **kwargs
+        )
+        bneck_channels = next_largest_dividend(
+            max(in_channels // self.bneck_div, 1), self.bneck_channel_div
+        )
+        backbone = [nn.Conv2d(
+            in_channels, bneck_channels,
+            kernel_size=1, groups=self.bneck_groups
+        )]
+        if self.bneck_activ:
+            backbone.append(self.bneck_activ())
+        backbone.append(nn.Conv2d(
+            bneck_channels, bneck_channels,
+            kernel_size=filt_kernel_size,
+            padding=tuple(filt_kernel_size[i] // 2 for i in range(2)) if self.zero_pad else 0,
+        ))
+        if self.hidden_fc:
+            backbone.append(SpatialFC(self.fy, self.fx))
+        if self.activ:
+            backbone.append(self.activ())
+        if self.se_div:
+            backbone.append(SEBlock(bneck_channels, self.se_div))
+        backbone.append(nn.Conv2d(
+            bneck_channels, in_channels * out_channels, kernel_size=1, groups=self.inv_bneck_groups
+        ))
+        self.backbone = nn.Sequential(*backbone)
+        self.downsample_pad = [
+            0 if self.zero_pad else filt_kernel_size[i] - 1 for i in range(2)
+        ]
+
+    def weight_gen(self, x):
+        return self.backbone(F.interpolate(
+            x, size=(
+                self.fy + self.downsample_pad[0], self.fx + self.downsample_pad[1]),
+            mode="bilinear", align_corners=False
+        ))
+
+
+class PatchbasedBottleneckConvFilterGen(BottleneckConvFilterGen):
+    grid_size: int | tuple[int, int] = Field(4, description="Grid size for patch splitting")
+    reduction_channels: Optional[int] = Field(None, description="Optional channel reduction before patch split")
+    channel_reduce_kernel_size: int = Field(1, description="Kernel size for optional channel reduction")
+    channel_reduce_groups: int = Field(1, description="Groups for optional channel reduction")
+
+    def __init__(self, in_channels, out_channels, kernel_size, **kwargs):
+        if grid_size := kwargs.get("grid_size"):
+            grid_size = parse_filter_size(grid_size)
+            kwargs["grid_size"] = grid_size
+        super().__init__(
+            in_channels=in_channels, out_channels=out_channels,
+            kernel_size=kernel_size, **kwargs
+        )
+        filt_kernel_size = self.filt_kernel_size
+        reduction_channels = self.reduction_channels
+
+        bneck_channels = next_largest_dividend(
+            max(in_channels // self.bneck_div, 1), self.bneck_channel_div
+        )
+        self.downsample_pad = [0 if self.zero_pad else filt_kernel_size[i] - 1 for i in range(2)]
+
+        backbone = []
+        if reduction_channels:
+            backbone.append(nn.Conv2d(
+                in_channels, reduction_channels,
+                kernel_size=self.channel_reduce_kernel_size,
+                groups=self.channel_reduce_groups
+            ))
+        backbone.append(PatchSplit(grid_size=grid_size))
+        bneck_in_channels = grid_size[0] * grid_size[1] * (reduction_channels if reduction_channels else in_channels)
+        backbone.extend([
+            nn.Conv2d(bneck_in_channels, bneck_channels, kernel_size=1, groups=self.bneck_groups),
+            NoParamBilinear(self.fy + self.downsample_pad[0], self.fx + self.downsample_pad[1])
+        ])
+        if self.bneck_activ:
+            backbone.append(self.bneck_activ())
+        backbone.append(nn.Conv2d(
+            bneck_channels, bneck_channels,
+            kernel_size=filt_kernel_size,
+            padding=tuple(filt_kernel_size[i] // 2 for i in range(2)) if self.zero_pad else 0,
+        ))
+        if self.hidden_fc:
+            backbone.append(SpatialFC(self.fy, self.fx))
+        if self.activ:
+            backbone.append(self.activ())
+        if self.se_div:
+            backbone.append(SEBlock(bneck_channels, self.se_div))
+        backbone.append(nn.Conv2d(
+            bneck_channels, in_channels * out_channels,
+            kernel_size=1, groups=self.inv_bneck_groups
+        ))
+        self.backbone = nn.Sequential(*backbone)
+
+    def weight_gen(self, x):
+        return self.backbone(x)
+
+
 class DynamicConv2d(nn.Module):
     # ChatGPT + https://discuss.pytorch.org/t/how-to-apply-different-kernels-to-each-example-in-a-batch-when-using-convolution/84848/4
     def __init__(
@@ -120,4 +374,7 @@ class DynamicConv2d(nn.Module):
 
 FILTER_TYPES = {
     "fc": FCFilterGen,
+    "matmul": MatmulConvFilterGen,
+    "bottleneck": BottleneckConvFilterGen,
+    "pb_bottleneck": PatchbasedBottleneckConvFilterGen
 }
