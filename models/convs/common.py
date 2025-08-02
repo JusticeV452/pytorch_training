@@ -8,7 +8,7 @@ from torch.utils.checkpoint import checkpoint_sequential
 from typing import Optional, Union
 
 from models.components import SEBlock
-from models.convs.dynamic import FILTER_TYPES, DynamicConv2d_v2
+from models.convs.dynamic import FILTER_TYPES, DynamicConv2d
 from serialization import SerializableModule, AutoLambda, Lambda
 from utils import not_none
 
@@ -36,7 +36,7 @@ class ConvLayer(SerializableModule):
     )
     use_bias: bool = Field(False, description="Whether to use bias in convolutions")
     use_checkpointing: bool = Field(False, description="Enable checkpointing for convolutions")
-    filter_gen: Optional[AutoLambda[nn.Module]] = Field(
+    filter_gen: Optional[Union[str, AutoLambda[nn.Module]]] = Field(
         None, description="Filter generator class used if dynamic convolution is enabled"
     )
     se_param: Optional[Union[int, AutoLambda[nn.Module]]] = Field(
@@ -47,8 +47,8 @@ class ConvLayer(SerializableModule):
         if not mid_channels or num_convs:
             mid_channels = out_channels
         if filter_gen:
-            filter_gen = FILTER_TYPES[filter_gen] if isinstance(filter_gen, str) else filter_gen
-            kwargs["conv_type"] = Lambda(DynamicConv2d_v2, filt_gen=filter_gen)
+            # filter_gen = FILTER_TYPES[filter_gen] if isinstance(filter_gen, str) else filter_gen
+            kwargs["conv_type"] = Lambda(DynamicConv2d)
         super().__init__(
             in_channels=in_channels, out_channels=out_channels,
             mid_channels=mid_channels, num_convs=num_convs,
