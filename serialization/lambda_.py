@@ -231,7 +231,7 @@ class Lambda(ParamManager):
 
         def validate(v):
             if is_serialized_param_man(v):
-                v = parse_serialized_param_man(v)
+                _, v = parse_serialized_param_man(v)
             if isinstance(v, cls):
                 lam = v
             elif callable(v) or isinstance(v, str) or isinstance(v, dict):
@@ -361,8 +361,7 @@ class AutoLambda(Generic[Args, Return]):
             return v
         cast_type = Lambda
         if is_serialized_param_man(v):
-            cast_type = eval_obj_name(v[PARAM_MAN_SER_PREFIX])
-            v = parse_serialized_param_man(v)
+            cast_type, v = parse_serialized_param_man(v)
         if isinstance(v, type) and issubclass(v, nn.Module):
             cast_type = ModuleWrapper
         elif callable(v):

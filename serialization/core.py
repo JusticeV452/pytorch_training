@@ -14,13 +14,11 @@ PARAM_MAN_SER_PREFIX = "_ParamManager"
 
 
 def is_serialized_param_man(val) -> bool:
-    # return type(val) is str and val.startswith(PARAM_MAN_SER_PREFIX)
     return type(val) is dict and PARAM_MAN_SER_PREFIX in val
 
 
 def parse_serialized_param_man(val) -> dict:
-    # return ast.literal_eval(val[len(PARAM_MAN_SER_PREFIX):])
-    return val["config"]
+    return eval_obj_name(val[PARAM_MAN_SER_PREFIX][0]), val[PARAM_MAN_SER_PREFIX][1]
 
 
 def get_module_name(cls, shortest=True):
@@ -98,7 +96,7 @@ class ParamManager:
         inherit_order = reversed(cls._PM_inherit_order()) if inherit_fields else [cls.__mro__[0]]
 
         for base in inherit_order:
-            base_annotations = getattr(base, '__annotations__', {})
+            base_annotations = getattr(base, "__annotations__", {})
             base_defaults = {
                 k: getattr(base, k)
                 for k in base_annotations
@@ -177,8 +175,7 @@ class ParamManager:
                 if isinstance(v, ParamManager) else v
             )
         return dump if not explicit else {
-            "_ParamManager": get_module_name(self.__class__),
-            "config": dump
+            PARAM_MAN_SER_PREFIX: (get_module_name(self.__class__), dump)
         }
 
     def model_dump_json(self, *args, explicit=True, **kwargs):
@@ -198,10 +195,11 @@ class ParamManager:
     
     @classmethod
     def load_dict(cls, inp):
-        return eval_obj_name(inp[PARAM_MAN_SER_PREFIX])(**{
+        obj_cls_name, dump = inp[PARAM_MAN_SER_PREFIX]
+        return eval_obj_name(obj_cls_name)(**{
             k: cls.load_dict(v)
             if is_serialized_param_man(v) else v
-            for k, v in inp["config"].items()
+            for k, v in dump.items()
         })
 
     @classmethod
