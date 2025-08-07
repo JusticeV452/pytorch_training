@@ -6,7 +6,7 @@ from pydantic import Field
 from torch import nn
 
 from models.components import SEBlock
-from serialization import SerializableModule, AutoLambda
+from serialization import AutoLambda, SerializableModule
 from utils import int_round, next_largest_dividend, parse_filter_size
 
 

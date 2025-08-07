@@ -7,7 +7,7 @@ from torchmetrics.image.kid import KernelInceptionDistance
 from torch_fidelity import calculate_metrics
 from typing import Tuple
 
-from serialization import ParamManager, Lambda, AutoLambda, LambdaModuleT
+from serialization import AutoLambda, Lambda, LambdaModuleT, ParamManager
 from utils import channel_width_flatten
 
 

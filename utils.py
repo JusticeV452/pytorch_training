@@ -123,8 +123,12 @@ def channel_width_flatten(tensor):
     return reshaped_tensor
 
 
+def is_none(obj):
+    return type(obj) is type(None)
+
+
 def not_none(obj):
-    return type(obj) is not type(None)
+    return not is_none(obj)
 
 
 def count_parameters(model):

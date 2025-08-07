@@ -5,7 +5,7 @@ from pydantic import Field
 from torch import nn
 from torch.nn.utils.parametrizations import spectral_norm as torch_spectral_norm
 
-from serialization import SerializableModule, AutoLambda
+from serialization import AutoLambda, SerializableModule
 
 
 class MultiKernelConv(SerializableModule):
