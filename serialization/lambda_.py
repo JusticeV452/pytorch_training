@@ -309,7 +309,7 @@ class AutoLambda(Generic[Args, Return]):
 
     @classmethod
     def __get_pydantic_core_schema__(cls, source_type, handler: GetCoreSchemaHandler):
-        expected_args = None
+        expected_args_typ = None
         expected_return = None
 
         if get_origin(source_type) is AutoLambda:
@@ -317,18 +317,19 @@ class AutoLambda(Generic[Args, Return]):
             if len(type_args) == 1:
                 expected_return = type_args[0]
             elif len(type_args) == 2:
-                expected_args, expected_return = type_args
+                expected_args_typ, expected_return = type_args
             elif len(type_args) > 2:
                 raise TypeError(f"Unsupported AutoLambda type form: {type_args}")
 
         def validate(v):
             lam = cls._PM_auto_cast(v)
             func = None
-            if expected_args or expected_return:
+            if expected_args_typ or expected_return:
                 func = lam.get_func()
 
-            if expected_args:
+            if expected_args_typ and not lam.ignore_args_:
                 sig_params = inspect.signature(func).parameters.values()
+                expected_args = get_args(expected_args_typ)
                 if len(sig_params) != len(expected_args):
                     raise TypeError(
                         f"{func} takes {len(sig_params)} args, "
