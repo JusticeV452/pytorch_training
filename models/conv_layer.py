@@ -64,7 +64,8 @@ class ConvLayer(SerializableModule):
         elif type(residual_cfg) is dict:
             self.residual_type = "conv"
             self.residual = nn.Conv2d(
-                in_channels=in_channels, out_channels=out_channels, **residual_cfg)
+                in_channels=in_channels, out_channels=out_channels, **residual_cfg
+            )
             self.residual_transform = lambda result, inp: result + self.residual(inp)
         elif type(residual_cfg) in [float, int]:
             self.residual_type = "constant"
@@ -86,7 +87,7 @@ class ConvLayer(SerializableModule):
             return layer
 
         convs = sub_layer(in_channels, mid_channels)
-        for i in range(num_convs - 2):
+        for _ in range(num_convs - 2):
             convs.extend(sub_layer(mid_channels, mid_channels))
         if num_convs > 1:
             convs.extend(sub_layer(mid_channels, out_channels))

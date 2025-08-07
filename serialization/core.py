@@ -106,14 +106,25 @@ class ParamManager:
             defaults.update(base_defaults)
 
         fields = {}
+        field_to_name = {}
+        cls._field_inheritance = {}
+        cls._exclude_from_dump = set()
         for name, typ in annotations.items():
             default = defaults.get(name, ...)
+            field_to_name[default] = name
             print("field_name:", name)
 
             if isinstance(default, FieldInfo):
+                if default.exclude:
+                    cls._exclude_from_dump.add(name)
                 if default.default_factory is not None:
                     # Call default_factory to get value
                     default = default.default_factory()
+                elif isinstance(default.default, FieldInfo):
+                    parent_name = field_to_name[default.default]
+                    cls._field_inheritance.setdefault(parent_name, [])
+                    cls._field_inheritance[parent_name].append(name)
+                    default = default.default.default
                 elif default.default is not ...:
                     default = default.default
                 else:
@@ -148,8 +159,18 @@ class ParamManager:
         )
 
     def __init__(self, **kwargs):
+        # Inherit from defaults and provided args
+        subst_kwargs = {}
+        for attr, val in kwargs.items():
+            for child_attr in self._field_inheritance.get(attr, []):
+                if child_attr in kwargs:
+                    continue
+                subst_kwargs[child_attr] = val
+            subst_kwargs[attr] = val
+
         # Validate kwargs using the auto-generated Pydantic model
-        validated = self._schema(**kwargs)
+        validated = self._schema(**subst_kwargs)
+
         for k in self._schema.model_fields:
             object.__setattr__(self, k, getattr(validated, k))
         self._params = validated
@@ -165,7 +186,10 @@ class ParamManager:
         return self._params
     
     def param_model_dump(self, *args, **kwargs):
-        return self.params.model_dump(*args, **kwargs)
+        return {
+            k: v for k, v in self.params.model_dump(*args, **kwargs).items()
+            if k not in self._exclude_from_dump
+        }
 
     def model_dump(self, *args, explicit=True, **kwargs):
         dump = {}
