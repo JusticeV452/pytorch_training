@@ -1,12 +1,16 @@
 import os
 
+from utils import load_json, write_json
+
 
 class LossManager:
     def __init__(self):
         self.values = {}
+
     def get(self, key, default=0):
         values = self.values[key].get("val", [])
         return values[-1] if values else default
+
     def update(self, key, value=None, new_entry=False):
         assert (isinstance(key, dict) and value is None) or (key and value is not None)
         update_dict = key if value is None else {key: value}
@@ -33,12 +37,15 @@ class LossManager:
             new_avg = last_val + (val - last_val) / (idx + 1)
             self.values[key]["val"][-1] = new_avg
             self.values[key]["idx"][-1] += 1
+
     def save_dict(self, epoch=0):
         values = {key: state["val"] for key, state in self.values.items()}
         num_samples = {key: state["idx"] for key, state in self.values.items()}
         return {"epoch": epoch, "values": values, "num_samples": num_samples}
+
     def save(self, path, epoch=0):
         write_json(path, self.save_dict(epoch))
+
     def update_path(self, path, epoch=0, num_values=1):
         if not os.path.exists(path):
             self.save(path, epoch)
