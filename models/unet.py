@@ -442,13 +442,12 @@ class MultiInpFlexUNet(SerializableModel):
         ]
 
         def expand_glue_conv(glue_conv, enc_out):
-            if post_glue_norm and post_glue_activ:
-                glue_conv = nn.Sequential(glue_conv, post_glue_norm(enc_out), post_glue_activ())
-            elif post_glue_norm:
-                glue_conv = nn.Sequential(glue_conv, post_glue_norm(enc_out))
-            elif post_glue_activ:
-                glue_conv = nn.Sequential(glue_conv, post_glue_activ())
-            return glue_conv
+            layers = [glue_conv]
+            if post_glue_norm:
+                layers.append(post_glue_norm(enc_out))
+            if post_glue_activ:
+                layers.append(post_glue_activ())
+            return layers[0] if len(layers) == 1 else nn.Sequential(*layers,)
 
         if self.allow_glue:
             for i in range(num_layers):
@@ -477,7 +476,7 @@ class MultiInpFlexUNet(SerializableModel):
             in_channels = down_channels_outs[d - l]
             out_channels = down_channels_outs[d - l - 1]
             self.ups.append(FlexUp(
-                in_channels, out_channels
+                in_channels, out_channels# // factor moved into flexup based on bilinear
                 if l < num_layers - 1 else out_channels,
                 kernel_size=self.up_kernel_size, conv_layer_size=self.up_layer_size,
                 num_conv_layers=self.up_block_layers, bilinear=self.bilinear, norm_layer=norm_layer,
@@ -603,7 +602,10 @@ class UNetEnc(UNetDown):
         out = self.input_layer(x)
         shapes = [out.shape]
         for down_layer in self.downs:
-            out = self.layer_forward(down_layer, out, use_checkpoint=self.use_checkpointing)
+            out = self.layer_forward(
+                down_layer, out,
+                use_checkpoint=self.use_checkpointing
+            )
             shapes.append(out.shape)
         if self.flatten_out:
             out = Flatten()(out)
