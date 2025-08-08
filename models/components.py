@@ -14,10 +14,12 @@ class Flatten(nn.Module):
 
 
 class UnFlatten(nn.Module):
-    def __init__(self, shape):
+    def __init__(self, shape=None):
         super().__init__()
         self.shape = shape
     def forward(self, input):
+        if self.shape is None:
+            return input.view(input.shape[0], -1, 1, 1)
         return input.view(-1, *self.shape,)
 
 
