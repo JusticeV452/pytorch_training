@@ -66,6 +66,7 @@ def eval_obj_name(obj_name):
 
 
 class ParamManager:
+    # TODO: Make a full-save method that saves entire object state?
     """Auto-validating parameter manager without BaseModel inheritance."""
 
     def __init_subclass__(cls, inherit_fields: bool = True, **kwargs):

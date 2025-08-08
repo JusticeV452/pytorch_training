@@ -76,13 +76,12 @@ def eval_str(string):
         return globals()[string]
 
 
-# TODO: Remove arg_arity (make arity property base on passed kwargs and func kwargs)
-# TODO: Add limited support for passing literal lambda objects (dill.source.getsource / inspect.getsource)
-# TODO: Change save format to something like {"_PrmMn": (type, config)} (make less verbose)
-# TODO: Change AutoLambda to validate func result type using function annotation (if there enforce, else do nothing)
-# XTODO: Instead of force casting when passed, just cast when saving
 class Lambda(ParamManager):
-    # """A ParamManager-wrapped Lambda that supports arbitrary call signatures."""
+    # TODO: Remove arg_arity (make arity property base on passed kwargs and func kwargs)
+    # TODO: Add limited support for passing literal lambda objects (dill.source.getsource / inspect.getsource)
+    # TODO: Change AutoLambda to validate func result type using function annotation (if there enforce, else do nothing)
+
+    """A ParamManager-wrapped Lambda that supports arbitrary call signatures."""
 
     func_name: str | Callable[..., Any] = Field(
         ..., description="Function name as import path or callable."
