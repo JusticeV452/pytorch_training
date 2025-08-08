@@ -89,6 +89,7 @@ def construct_classifier(
     out_activ = kwargs.get("out_activ", nn.Sigmoid())
     spectral_norm = kwargs.get("spectral_norm", False)
     channel_div = kwargs.get("channel_div", 1)
+
     # Construct classifier
     classif_layers = []
     def linear_layer(in_dim, out_dim):
@@ -99,6 +100,7 @@ def construct_classifier(
             layer.append(norm_layer(out_dim))
         layer.append(layer_transform())
         return layer
+
     for _ in range(depth):
         out_dim = next_largest_dividend(in_channels // reduction_factor, channel_div)
         if out_dim == 0:
@@ -121,6 +123,9 @@ def construct_conv_classifier(
     kernel_size = kwargs.get("kernel_size", 1)
     channel_div = kwargs.get("channel_div", 1)
     spectral_norm = kwargs.get("spectral_norm", False)
+    dim_reducer = kwargs.get("dim_reducer", Mean)
+    out_activ = kwargs.get("out_activ", nn.Sigmoid())
+
     # Construct classifier
     classif_layers = []
     def layer(in_channels, out_channels):
@@ -145,7 +150,8 @@ def construct_conv_classifier(
             in_channels, 1, kernel_size=kernel_size,
             padding=(kernel_size - 1) // 2
         ),
-        Mean(),
-        nn.Sigmoid()
+        dim_reducer()
     ])
+    if out_activ is not None:
+        classif_layers.append(out_activ)
     return nn.Sequential(*classif_layers)
