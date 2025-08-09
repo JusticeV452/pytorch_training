@@ -1,5 +1,6 @@
 import torch
 
+
 def fine_grained_prune(tensor: torch.Tensor, sparsity : float) -> torch.Tensor:
     """
     magnitude-based pruning for single tensor
@@ -32,16 +33,19 @@ def fine_grained_prune(tensor: torch.Tensor, sparsity : float) -> torch.Tensor:
 
     return mask
 
+
 class FineGrainedPruner:
     def __init__(self, model, default_sparsity, sparsity_dict=None):
         self.sparsity_dict = {} if sparsity_dict is None else sparsity_dict
         self.default_sparsity = default_sparsity
         self.masks = self.create_masks(model)
+
     @torch.no_grad()
     def prune(self, model):
         for name, param in model.named_parameters():
             if name in self.masks:
                 param *= self.masks[name]
+
     @torch.no_grad()
     def create_masks(self, model):
         masks = dict()
@@ -50,15 +54,18 @@ class FineGrainedPruner:
                 sparsity = self.sparsity_dict.get(name, self.default_sparsity)
                 masks[name] = fine_grained_prune(param, sparsity)
         return masks
-    
+
+
 class DummyPruner(FineGrainedPruner):
     def __init__(self, model, default_sparsity, sparsity_dict=None):
         self.sparsity_dict = {} if sparsity_dict is None else sparsity_dict
         self.default_sparsity = default_sparsity
         self.masks = {}
+
     @torch.no_grad()
     def prune(self, model):
         return
+
     @torch.no_grad()
     def create_masks(self, model):
         return {}
