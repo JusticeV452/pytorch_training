@@ -1,3 +1,8 @@
+import torch
+
+from torch import nn
+
+
 class BatchNormAccumulator:
     """
     Hook-based BatchNorm accumulator for gradient accumulation.
