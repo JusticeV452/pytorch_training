@@ -34,7 +34,7 @@ class ConvPixelShuffleUpscale(SerializableModule):
             in_channels, pre_conv_out, kernel_size=self.kernel_size,
             padding=self.padding, bias=self.pre_conv_bias
         )
-        groups = in_channels if groups == -1 else groups
+        groups = in_channels if self.groups == -1 else self.groups
         self.pre_conv = pre_conv if groups is None else nn.Sequential(
             pre_conv,
             nn.GroupNorm(groups, pre_conv_out)
@@ -265,7 +265,7 @@ class UNetDown(SerializableModel):
     num_channels: int = Field(..., description="Number of input channels")
     conv_start: int = Field(64, description="Initial number of convolution channels")
     kernel_size: int = Field(3, description="Kernel size for convolutions")
-    conv_layer_size: int = Field(2, description="Number of convolutions in the input layer")
+    conv_layer_size: int = Field(2, description="Number of convolutions in internal ConvLayers")
     num_layers: int = Field(4, description="Number of downsampling layers")
     conv_block_layers: int = Field(1, description="Number of convolutions per downsampling block")
     norm_layer: AutoLambda[nn.Module] = Field(nn.BatchNorm2d, description="Normalization layer type")
@@ -275,7 +275,9 @@ class UNetDown(SerializableModel):
     growth_rate: float = Field(2.0, description="Channel growth rate per layer")
     use_checkpointing: bool = Field(False, description="Enable activation checkpointing")
     layer_sizes: Optional[list[int]] = Field(None, description="Predefined layer sizes")
-    conv_residual: Optional[dict] = Field(None, description="Residual block configuration for conv layers")
+    conv_residual: Optional[Union[str, dict, float, int, AutoLambda]] = Field(
+        None, description="Residual connection config for convolution blocks"
+    )
     channel_div: int = Field(1, description="Ensure channels divisible by this value")
     filter_gen: Optional[Union[str, AutoLambda[nn.Module]]] = Field(None, description="Optional dynamic filter generator")
     conv_se_param: Optional[Union[int, AutoLambda[nn.Module]]] = Field(None, description="SE block reduction ratio")
@@ -377,7 +379,9 @@ class MultiInpFlexUNet(SerializableModel):
     down_activ: Optional[AutoLambda[nn.Module]] = Field(activ_type, description="Optional override for down path activation")
     up_activ: Optional[AutoLambda[nn.Module]] = Field(activ_type, description="Optional override for up path activation")
     growth_rate: float = Field(2.0, description="Channel width multiplier between layers")
-    residual: Optional[bool] = Field(None, description="Whether to use residual connections")
+    residual: Optional[Union[str, dict, float, int, AutoLambda]] = Field(
+        None, description="Residual connection config for convolution blocks"
+    )
     conv_se_param: Optional[Union[int, AutoLambda[nn.Module]]] = Field(None, description="SE layer reduction ratio (if used)")
     post_glue_activ: Optional[AutoLambda[nn.Module]] = Field(None, description="Activation after glue layer")
     post_glue_norm: Optional[AutoLambda[nn.Module]] = Field(None, description="Normalization after glue layer")
@@ -594,7 +598,7 @@ class UNetEnc(UNetDown):
         nn.SiLU, description="Activation function to use in encoder"
     )
     conv_residual: Optional[Union[str, dict, float, int, AutoLambda]] = Field(
-        0.1, description="Residual connection strength for convolution blocks"
+        0.1, description="Residual connection config for convolution blocks"
     )
     bilinear: bool = Field(False, description="Whether to use bilinear upsampling")
 
