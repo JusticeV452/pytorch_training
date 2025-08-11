@@ -117,22 +117,16 @@ class Discriminator(SerializableModel):
         return nn.Sequential(*classif_layers)
 
     def encode(self, x):
-        encode = (
-            (lambda inp: checkpoint_sequential(self.encoder, self.num_encoder_checkpoints, inp))
-            if self.num_encoder_checkpoints else self.encoder
-        )
-        return encode(x)
+        return self.checkpoint_sequential_run(self.encoder, self.num_encoder_checkpoints, x)
 
     def classify(self, x):
         return self.forward(x)[0]
 
     def forward(self, x):        
         enc = self.encode(x)
-        classify = (
-            (lambda inp: checkpoint_sequential(self.classifier, self.num_classifier_checkpoints, inp))
-            if self.num_classifier_checkpoints else self.classifier
+        out = self.checkpoint_sequential_run(
+            self.classifier, self.num_classifier_checkpoints, enc
         )
-        out = classify(enc)
         return out, enc
 
     def set_dropout_state(self, enabled):

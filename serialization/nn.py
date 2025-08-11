@@ -62,6 +62,12 @@ class SerializableModel(SerializableModule):
             )
         return layer(*args)
 
+    def checkpoint_sequential_run(self, func, num_checkpoints, inp):
+        if num_checkpoints:
+            return checkpoint_sequential(func, num_checkpoints, inp)
+        return func(inp)
+
+
 
 def __getattr__(name):
     try:
