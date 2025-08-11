@@ -1,7 +1,7 @@
 import math
 import torch
 
-from typing import Optional
+from typing import Optional, Sequence, Tuple, Union
 from pydantic import Field
 from torch import nn
 from torch.nn.utils.parametrizations import spectral_norm as torch_spectral_norm
@@ -144,8 +144,8 @@ class FlexDiscrim(Discriminator):
     layer_transform: AutoLambda[nn.Module] = Field(
         nn.LeakyReLU, description="Activation function used in encoder blocks"
     )
-    dropout: float = Field(0.0, description="Dropout applied after each encoder block")
-    kernel_sizes: Optional[list[int]] = Field(
+    dropout: Union[float, Sequence[float]] = Field(0.0, description="Dropout applied after each encoder block")
+    kernel_sizes: Optional[list[Union[int, Tuple[int, int]]]] = Field(
         None, description="Optional list of kernel sizes per encoder layer"
     )
     init_func: Optional[AutoLambda] = Field(
@@ -193,10 +193,12 @@ class FlexDiscrim(Discriminator):
         enc_norm_layer = self.enc_norm_layer
         num_channels = self.num_channels
         cls_type = self.cls_type
+        num_layers = self.num_layers
 
         if self.kernel_sizes is None:
             assert kernel_size
-            self.kernel_sizes = kernel_sizes = [kernel_size for _ in range(num_layers + 1)]
+            self.kernel_sizes = [kernel_size for _ in range(num_layers + 1)]
+        kernel_sizes = self.kernel_sizes
 
         layers = []
         num_layers = (
@@ -205,11 +207,12 @@ class FlexDiscrim(Discriminator):
         )
 
         num_dropouts = ((num_layers + 3) + (num_layers + 1) * (layer_depth - 1))
-        if type(dropout) in [int, float]:            
-            dropout = [dropout] * num_dropouts
-        if len(dropout) < num_dropouts:
-            dropout += [dropout[-1]] * (num_dropouts - len(dropout))
-        assert all(0 <= d <= 1 for d in dropout), "Dropout should be in range [0, 1]"
+        dropout_probs = []
+        if type(self.dropout) in [int, float]:
+            dropout_probs = [self.dropout] * num_dropouts
+        if len(dropout_probs) < num_dropouts:
+            dropout_probs += [dropout_probs[-1]] * (num_dropouts - len(dropout_probs))
+        assert all(0 <= d <= 1 for d in dropout_probs), "Dropout should be in range [0, 1]"
         dropout_idx = 0
 
         # Construct encoder
@@ -225,7 +228,7 @@ class FlexDiscrim(Discriminator):
                 padding = kernel_size // 2 if padding is None else padding
             layer = [norm_wrapper(cnv_type(in_channels, out_channels, kernel_size, padding=padding, stride=stride))]
 
-            self.dropouts.append(ToggleDropout2d(dropout[dropout_idx]))
+            self.dropouts.append(ToggleDropout2d(dropout_probs[dropout_idx]))
             layer.append(self.dropouts[-1])
             dropout_idx += 1
 
@@ -248,7 +251,7 @@ class FlexDiscrim(Discriminator):
             extend_layers = sum([
                 conv_layer(out_channels, out_channels, stride=1, cnv_type=self.block_conv_type)
                 for _ in range(layer_depth - 1)
-            ])
+            ], [])
             layers += [ResConn(extend_layers)] if layer_depth - 1 and self.use_conv_residual else extend_layers
             if self.se_block_gen:
                 layers.append(self.se_block_gen(out_channels))
