@@ -65,15 +65,16 @@ def eval_obj_name(obj_name):
     return obj
 
 
+def is_generic_type(typ):
+    return get_origin(typ) is not None
+
+
 class ParamManager:
     # TODO: Make a full-save method that saves entire object state?
     """Auto-validating parameter manager without BaseModel inheritance."""
 
     def __init_subclass__(cls, inherit_fields: bool = True, **kwargs):
         super().__init_subclass__(**kwargs)
-
-        def is_generic_type(typ):
-            return get_origin(typ) is not None
 
         def get_auto_caster(typ):
             # Directly from typ or its origin
@@ -178,14 +179,14 @@ class ParamManager:
 
     def __dict__(self):
         return self.as_dict()
-    
+
     def __str__(self):
         return self.model_dump_json()
 
     @property
     def params(self):
         return self._params
-    
+
     def param_model_dump(self, *args, **kwargs):
         return {
             k: v for k, v in self.params.model_dump(*args, **kwargs).items()
@@ -206,31 +207,33 @@ class ParamManager:
     def model_dump_json(self, *args, explicit=True, **kwargs):
         return json.dumps(self.model_dump(
             *args, explicit=explicit, **kwargs
-        ))
+        ), cls=ParamEncoder)
 
     def as_dict(self, *args, **kwargs) -> dict:
         return self.model_dump(*args, **kwargs)
-    
+
     def save(self, save_path):
         return write_json(save_path, self.as_dict())
-    
+
     @classmethod
     def load(cls, path):
         return cls.load_dict(load_json(path))
     
     @classmethod
     def load_dict(cls, inp):
-        obj_cls_name, dump = inp[PARAM_MAN_SER_PREFIX]
-        return eval_obj_name(obj_cls_name)(**{
+        if is_serialized_param_man(inp):
+            v_cls, cls_dict = parse_serialized_param_man(inp)
+            return v_cls.load_dict(cls_dict)
+        return cls(**{
             k: cls.load_dict(v)
             if is_serialized_param_man(v) else v
-            for k, v in dump.items()
+            for k, v in inp.items()
         })
 
     @classmethod
     def load_json(cls, inp):
         return cls.load_dict(json.loads(inp))
-    
+
     @classmethod
     def _PM_inherit_order(cls):
         return tuple(c for c in cls.__mro__ if issubclass(c, ParamManager))
