@@ -7,7 +7,15 @@ from torch import nn
 
 from models.components import SEBlock
 from serialization import AutoLambda, SerializableModule
+from serialization.core import PMAutoCaster
 from utils import int_round, next_largest_dividend, parse_filter_size
+
+
+class Size2D(PMAutoCaster):
+    @classmethod
+    def _PM_auto_cast(cls, v):
+        assert isinstance(v, int | tuple | list), f"Cannot cast {v} to Size2d"
+        return parse_filter_size(v)
 
 
 def split_into_patches(x, P):
@@ -97,7 +105,6 @@ class SpatialFC(nn.Module):
 class FilterGen(SerializableModule):
     in_channels: int = Field(..., description="Number of input channels")
     out_channels: int = Field(..., description="Number of output channels")
-    kernel_size: int | tuple[int, int] = Field(..., description="Kernel size for dynamic filters")
 
     def __init__(self, in_channels, out_channels, kernel_size, **kwargs):
         kernel_size = parse_filter_size(kernel_size)
@@ -106,8 +113,10 @@ class FilterGen(SerializableModule):
             kernel_size=kernel_size, **kwargs
         )
         self.fy, self.fx = kernel_size
+
     def weight_gen(self, x):
         raise NotImplementedError
+
     def forward(self, x):
         return self.weight_gen(x).view(-1, x.shape[1], self.fy, self.fx)
 
@@ -157,7 +166,7 @@ class FCFilterGen(FilterGen):
 
 
 class MatmulConvFilterGen(FilterGen):
-    filt_kernel_size: int | tuple[int, int] = Field(
+    filt_kernel_size: Size2D = Field(
         3, description="Kernel size used in internal filter generation convolutions"
     )
     zero_pad: bool = Field(
@@ -166,11 +175,11 @@ class MatmulConvFilterGen(FilterGen):
     use_in_conv: bool = Field(True, description="Whether to apply a pre-filter convolution on the input")
 
     def __init__(self, in_channels, out_channels, kernel_size, **kwargs):
-        filt_kernel_size = parse_filter_size(filt_kernel_size)
         super().__init__(
             in_channels=in_channels, out_channels=out_channels,
             kernel_size=kernel_size, **kwargs
         )
+        filt_kernel_size = self.filt_kernel_size
         zero_pad = self.zero_pad
         self.in_conv = nn.Conv2d(
             in_channels, in_channels,
@@ -210,7 +219,7 @@ class MatmulConvFilterGen(FilterGen):
 
 
 class BottleneckConvFilterGen(FilterGen):
-    filt_kernel_size: int | tuple[int, int] = Field(3, description="Internal filter kernel size")
+    filt_kernel_size: Size2D = Field(3, description="Internal filter kernel size")
     bneck_div: int = Field(16, description="Bottleneck channel division factor")
     zero_pad: bool = Field(False, description="Whether to use zero padding")
     se_div: int = Field(4, description="Squeeze-excitation reduction ratio (0 disables SE block)")
@@ -222,13 +231,11 @@ class BottleneckConvFilterGen(FilterGen):
     hidden_fc: bool = Field(False, description="Whether to apply spatial fully-connected layer")
 
     def __init__(self, in_channels, out_channels, kernel_size, **kwargs):
-        if filt_kernel_size := kwargs.get("filt_kernel_size"):
-            filt_kernel_size = parse_filter_size(filt_kernel_size)
-            kwargs["filt_kernel_size"] = filt_kernel_size
         super().__init__(
             in_channels=in_channels, out_channels=out_channels,
             kernel_size=kernel_size, **kwargs
         )
+        filt_kernel_size = self.filt_kernel_size
         bneck_channels = next_largest_dividend(
             max(in_channels // self.bneck_div, 1), self.bneck_channel_div
         )
@@ -266,19 +273,17 @@ class BottleneckConvFilterGen(FilterGen):
 
 
 class PatchbasedBottleneckConvFilterGen(BottleneckConvFilterGen):
-    grid_size: int | tuple[int, int] = Field(4, description="Grid size for patch splitting")
+    grid_size: Size2D = Field(4, description="Grid size for patch splitting")
     reduction_channels: Optional[int] = Field(None, description="Optional channel reduction before patch split")
     channel_reduce_kernel_size: int = Field(1, description="Kernel size for optional channel reduction")
     channel_reduce_groups: int = Field(1, description="Groups for optional channel reduction")
 
     def __init__(self, in_channels, out_channels, kernel_size, **kwargs):
-        if grid_size := kwargs.get("grid_size"):
-            grid_size = parse_filter_size(grid_size)
-            kwargs["grid_size"] = grid_size
-        super().__init__(
-            in_channels=in_channels, out_channels=out_channels,
+        FilterGen.__init__(
+            self, in_channels=in_channels, out_channels=out_channels,
             kernel_size=kernel_size, **kwargs
         )
+        grid_size = self.grid_size
         filt_kernel_size = self.filt_kernel_size
         reduction_channels = self.reduction_channels
 
@@ -312,7 +317,7 @@ class PatchbasedBottleneckConvFilterGen(BottleneckConvFilterGen):
         if self.activ:
             backbone.append(self.activ())
         if self.se_div:
-            backbone.append(SEBlock(bneck_channels, self.se_div))
+            backbone.append(SEBlock(bneck_channels, reduction_ratio=self.se_div))
         backbone.append(nn.Conv2d(
             bneck_channels, in_channels * out_channels,
             kernel_size=1, groups=self.inv_bneck_groups
