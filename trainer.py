@@ -323,10 +323,12 @@ class ModelTrainer(ParamManager):
                 _use_new_zipfile_serialization=self.new_save_format
             )
 
-    def eval(self):
+    def eval(self, enable_grad=False):
+        self.model.requires_grad_(enable_grad)
         return self.model.eval()
 
-    def train(self):
+    def train(self, enable_grad=True):
+        self.model.requires_grad_(enable_grad)
         return self.model.train()
 
     def prune(self):
@@ -373,8 +375,7 @@ class ModelTrainer(ParamManager):
         if self.bn_accumulator:
             self.bn_accumulator.remove_hooks()
         self.diversity_loss_man.remove_hooks()
-        self.model.eval()
-        self.model.requires_grad_(False)
+        self.eval()
 
     @property
     def last_loss_components(self):
