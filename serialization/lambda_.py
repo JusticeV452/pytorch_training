@@ -246,9 +246,9 @@ class Lambda(SerializableCallable):
 
 
 class FuncWrapper(Lambda):
-    def __init__(self, func):
+    def __init__(self, func_name):
         super().__init__(
-            func_name=func,
+            func_name=func_name,
             func_caching_=True,
             ignore_args_=False
         )
@@ -256,8 +256,6 @@ class FuncWrapper(Lambda):
         return self.get_func()(*args, **kwargs)
     def param_model_dump(self, *args, **kwargs):
         return {"func_name": self.func_name}
-    def eval_func_name(self, allowed_funcs=None):
-        return self._func
 
 
 class ModuleWrapper(FuncWrapper):
