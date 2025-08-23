@@ -1,17 +1,21 @@
 import torch
 import torch.nn.functional as F
-from torch.autograd import Variable
+
 from math import exp
+from torch.autograd import Variable
+
 
 def gaussian(window_size, sigma):
     gauss = torch.Tensor([exp(-(x - window_size//2)**2/float(2*sigma**2)) for x in range(window_size)])
     return gauss/gauss.sum()
+
 
 def create_window(window_size, channel, dtype=torch.float32):
     _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
     _2D_window = _1D_window.mm(_1D_window.t()).to(dtype).unsqueeze(0).unsqueeze(0)
     window = Variable(_2D_window.expand(channel, 1, window_size, window_size).contiguous())
     return window
+
 
 def _ssim(img1, img2, window, window_size, channel, reduce_mode = "mean"):
     mu1 = F.conv2d(img1, window, padding = window_size//2, groups = channel)
@@ -37,6 +41,7 @@ def _ssim(img1, img2, window, window_size, channel, reduce_mode = "mean"):
     else:
         return ssim_map.mean(1).mean(1).mean(1).sum()
 
+
 class SSIM(torch.nn.Module):
     def __init__(self, window_size = 11, size_average = True, dtype=torch.float32, reduce_mode=None):
         super(SSIM, self).__init__()
@@ -54,28 +59,29 @@ class SSIM(torch.nn.Module):
             window = self.window
         else:
             window = create_window(self.window_size, channel, self.dtype)
-            
+
             if img1.is_cuda:
                 window = window.cuda(img1.get_device())
             window = window.type_as(img1)
-            
+
             self.window = window
             self.channel = channel
 
-
         return _ssim(img1, img2, window, self.window_size, channel, self.reduce_mode)
+
 
 def ssim(img1, img2, window_size = 11, size_average = True, dtype=torch.float32, reduce_mode=None):
     (_, channel, _, _) = img1.size()
     window = create_window(window_size, channel, dtype)
-    
+
     if img1.is_cuda:
         window = window.cuda(img1.get_device())
     window = window.type_as(img1)
     if reduce_mode is None:
         reduce_mode = "mean" if size_average else "sum"
-    
+
     return _ssim(img1, img2, window, window_size, channel, reduce_mode)
+
 
 class NSSIM(SSIM):
     def __init__(self, window_size = 11, size_average = True, dtype=torch.float32, reduce_mode=None):
