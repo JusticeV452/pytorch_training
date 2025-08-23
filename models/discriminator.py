@@ -200,6 +200,9 @@ class FlexDiscrim(Discriminator):
         if self.kernel_sizes is None:
             assert kernel_size
             self.kernel_sizes = [kernel_size for _ in range(num_layers + 1)]
+        if len(self.kernel_sizes) < num_layers + 1:
+            for _ in range(num_layers + 1 - len(self.kernel_sizes)):
+                self.kernel_sizes.append(self.kernel_sizes[-1])
         kernel_sizes = self.kernel_sizes
 
         layers = []
