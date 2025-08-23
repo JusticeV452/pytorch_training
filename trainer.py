@@ -833,8 +833,8 @@ class GANTrainingEnv(TrainingEnv):
 class DiscrimTrainer(ModelTrainer):
     display_confidence: bool = Field(True, description="Whether to display model confidence")
     label_flip_prob: float = Field(0.0, description="Probability of flipping labels (for data augmentation)")
-    positive_label: int = Field(1, description="Label value for positive class")
-    negative_label: int = Field(0, description="Label value for negative class")
+    positive_label: float = Field(1.0, description="Label value for positive class")
+    negative_label: float = Field(0.0, description="Label value for negative class")
     add_noise: bool = Field(False, description="Whether to add noise to inputs")
     mixup_alpha: Optional[float] = Field(0.4, description="Alpha parameter for mixup augmentation")
     mixup_samples: Optional[float] = Field(None, description="Ratio of images to use for mixup loss")
@@ -842,6 +842,7 @@ class DiscrimTrainer(ModelTrainer):
     show_KID: bool = Field(False, description="Show Kernel Inception Distance (KID) metric")
     show_FID: bool = Field(False, description="Show Frechet Inception Distance (FID) metric")
     fm_loss_mult: float = Field(0.0, description="Weight multiplier for feature matching loss")
+    input_shuffle: bool = Field(True, description="Whether to shuffle inputs when classifying")
 
     def get_progress_report(self):
         loss_cmps = self.last_loss_components
@@ -873,25 +874,28 @@ class DiscrimTrainer(ModelTrainer):
         dtype = self.dtype
         images = images.to(device, dtype)
         recon_x = recon_x.to(device, dtype)
-        real_ex = self.positive_label * torch.ones(
-            images.shape[0], 1, device=device, dtype=dtype
-        )
-        fake_ex = torch.zeros(recon_x.shape[0], 1, device=device, dtype=dtype)
+        num_reals = images.shape[0]
+        num_fakes = recon_x.shape[0]
+        real_ex = torch.full((num_reals, 1), self.positive_label, device=device, dtype=dtype)
+        fake_ex = torch.full((num_fakes, 1), self.negative_label, device=device, dtype=dtype)
+
         if self.label_flip_prob:
             # Recommended 0.05
             flip_prob = self.label_flip_prob
-            mask = flip_prob < torch.rand(images.shape[0], 1, device=device, dtype=dtype)
-            real_ex *= mask
-            real_ex += self.negative_label * ~mask
-            fake_ex = self.positive_label * (fake_ex + ~mask) + self.negative_label * mask
-        else:
-            fake_ex += self.negative_label
-        pred, enc = self.model(torch.cat([images, recon_x]))
-        loss = self.call_loss_func(
-            pred,
-            torch.cat([real_ex, fake_ex]),
-            calc_metrics=calc_metrics
-        )
+            # mask = ~(torch.rand(images.shape[0], 1, device=device, dtype=discrim_dtype) < flip_prob)
+            mask = flip_prob < torch.rand(num_reals, 1, device=device, dtype=dtype)
+            real_ex = real_ex * mask + self.negative_label * ~mask
+            mask_f = flip_prob < torch.rand(num_fakes, 1, device=device, dtype=dtype)
+            fake_ex = fake_ex * mask_f + self.positive_label * ~mask_f
+
+        x = torch.cat([images, recon_x])
+        ex = torch.cat([real_ex, fake_ex])
+        if self.input_shuffle:
+            idx = torch.randperm(num_reals + num_fakes, device=device)
+            x, ex = x[idx], ex[idx]
+        pred, enc = self.model(x)
+        loss = self.call_loss_func(pred, ex, calc_metrics=calc_metrics)
+
         if isinstance(self.mixup_alpha, int | float) and self.mixup_samples:
             num_mixup_samples = int(len(images) * self.mixup_samples)
             mixup_samples, lam = mixup_data(
