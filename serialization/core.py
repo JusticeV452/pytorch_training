@@ -163,9 +163,23 @@ class ParamManager:
             __config__=ConfigDict(extra="forbid", frozen=True),
             **fields
         )
+        cls._PM_schema_defaults = fields
+        cls._PM_required_args = [
+            field_name for field_name, (_, default_val) in cls._PM_schema_defaults.items()
+            if default_val is ...
+        ]
 
-    def __init__(self, **kwargs):
+    def __init__(self, *args, **kwargs):
         # Inherit from defaults and provided args
+        assert len(args) <= len(self._PM_schema_defaults), (
+            f"{len(args)} positional arguments provided but {self.__class__.__name__}"
+            f" accepts at most {len(self._PM_schema_defaults)}"
+        )
+        named_args = dict(zip(self._PM_schema_defaults, args))
+        duplicates = set(named_args) & set(kwargs)
+        if duplicates:
+            error_str = '\n'.join([f"Got multiple values for argument {dup}" for dup in duplicates])
+            raise TypeError(error_str)
         subst_kwargs = {}
         for attr, val in kwargs.items():
             for child_attr in self._field_inheritance.get(attr, []):
@@ -175,7 +189,7 @@ class ParamManager:
             subst_kwargs[attr] = val
 
         # Validate kwargs using the auto-generated Pydantic model
-        validated = self._schema(**subst_kwargs)
+        validated = self._schema(**named_args, **subst_kwargs)
 
         for k in self._schema.model_fields:
             object.__setattr__(self, k, getattr(validated, k))
