@@ -105,6 +105,7 @@ class SpatialFC(nn.Module):
 class FilterGen(SerializableModule):
     in_channels: int = Field(..., description="Number of input channels")
     out_channels: int = Field(..., description="Number of output channels")
+    kernel_size: Size2D = Field(..., description="Kernel size for dynamic filters")
 
     def __init__(self, in_channels, out_channels, kernel_size, **kwargs):
         kernel_size = parse_filter_size(kernel_size)
@@ -328,11 +329,20 @@ class PatchbasedBottleneckConvFilterGen(BottleneckConvFilterGen):
         return self.backbone(x)
 
 
-class DynamicConv2d(nn.Module):
+class DynamicConv2d(SerializableModule):
+    in_channels: int = Field(..., description="Number of input channels")
+    out_channels: int = Field(..., description="Number of output channels")
+    kernel_size: Size2D = Field(..., description="Size of the convolution kernel")
+    stride: Size2D = Field(1, description="Stride of the convolution")
+    padding: Size2D = Field(0, description="Padding added to both sides of input")
+    dilation: Size2D = Field(1, description="Spacing between kernel elements")
+    groups: int = Field(1, description="Number of groups for convolution")
+    bias: bool = Field(False, description="Whether to include bias")
+    filter_gen: AutoLambda[nn.Module] = Field(FCFilterGen, description="Filter generation network class")
+    filter_gen_kwargs: dict = Field(default_factory=dict, description="Keyword args for filter generator")
+
     # ChatGPT + https://discuss.pytorch.org/t/how-to-apply-different-kernels-to-each-example-in-a-batch-when-using-convolution/84848/4
-    def __init__(
-            self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1,
-            groups=1, bias=False, filter_gen=FCFilterGen, filter_gen_kwargs=None):
+    def __init__(self, in_channels, out_channels, kernel_size, **kwargs):
         """
         A dynamic 2D convolutional layer that generates filters based on the input.
 
@@ -345,18 +355,13 @@ class DynamicConv2d(nn.Module):
             padding (int or tuple): Zero-padding added to both sides of the input.
             dilation (int or tuple): Spacing between kernel elements.
         """
-        super().__init__()
-
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.kernel_size = parse_filter_size(kernel_size)
-        self.stride = parse_filter_size(stride)
-        self.padding = parse_filter_size(padding)
-        self.dilation = parse_filter_size(dilation)
-        filter_gen_kwargs = filter_gen_kwargs if filter_gen_kwargs else {}
+        super().__init__(in_channels, out_channels, kernel_size, **kwargs)
 
         # Filter generation network
-        self.filter_generator = filter_gen(in_channels, out_channels, kernel_size, **filter_gen_kwargs)
+        self.filter_generator = self.filter_gen(
+            self.in_channels, self.out_channels, self.kernel_size,
+            **self.filter_gen_kwargs
+        )
 
     def forward(self, x):
         N, _, H, W = x.shape
