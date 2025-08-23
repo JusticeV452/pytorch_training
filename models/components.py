@@ -90,13 +90,15 @@ def construct_classifier(
     use_out_bias = kwargs.get("use_out_bias", False)
     out_activ = kwargs.get("out_activ", nn.Sigmoid())
     spectral_norm = kwargs.get("spectral_norm", False)
+    all_spectral_norm = kwargs.get("force_all_spec_norm", False)
     channel_div = kwargs.get("channel_div", 1)
+    num_outputs = kwargs.get("num_outputs", 1)
 
     # Construct classifier
     classif_layers = []
     def linear_layer(in_dim, out_dim):
         layer = [nn.Linear(in_dim, out_dim)]
-        if spectral_norm:
+        if spectral_norm and all_spectral_norm:
             layer[0] = torch_spectral_norm(layer[0])
         if norm_layer:
             layer.append(norm_layer(out_dim))
@@ -110,9 +112,11 @@ def construct_classifier(
         classif_layers.extend(linear_layer(in_channels, out_dim))
         in_channels = out_dim
 
-    classif_layers.append(
-        nn.Linear(out_dim, 1, bias=use_out_bias)
-    )
+    final_layer = nn.Linear(out_dim, num_outputs, bias=use_out_bias)
+    if spectral_norm:
+        final_layer = torch_spectral_norm(final_layer)
+
+    classif_layers.append(final_layer)
     if out_activ is not None:
         classif_layers.append(out_activ)
     return nn.Sequential(*classif_layers)

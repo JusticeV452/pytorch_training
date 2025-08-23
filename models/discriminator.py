@@ -82,7 +82,7 @@ class Discriminator(SerializableModel):
 
     def construct_classifier(
             self, in_dim, classifier_depth, classifier_reduction_factor,
-            cls_norm_layer, layer_transform, spectral_norm=False
+            cls_norm_layer, layer_transform, spectral_norm=False, **kwargs
         ):
         # Construct classifier
         classif_layers = []
@@ -216,15 +216,18 @@ class FlexDiscrim(Discriminator):
         dropout_idx = 0
 
         # Construct encoder
-        def conv_layer(in_channels, out_channels, kernel_size=kernel_sizes[1], padding=None, stride=2, cnv_type=conv_type):
+        def conv_layer(
+                in_channels, out_channels, kernel_size=kernel_sizes[1],
+                padding=None, stride=2, cnv_type=conv_type, use_spectral_norm=False
+            ):
             nonlocal dropout_idx
             nonlocal layers
             if type(kernel_size) is tuple:
-                cnv_type = Lambda(MultiKernelConv, conv_type=cnv_type, spectral_norm=self.spectral_norm)
+                cnv_type = Lambda(MultiKernelConv, conv_type=cnv_type, spectral_norm=use_spectral_norm)
                 padding = "same"
                 norm_wrapper = lambda x: x
             else:
-                norm_wrapper = torch_spectral_norm if self.spectral_norm else lambda x: x
+                norm_wrapper = torch_spectral_norm if use_spectral_norm else lambda x: x
                 padding = kernel_size // 2 if padding is None else padding
             layer = [norm_wrapper(cnv_type(in_channels, out_channels, kernel_size, padding=padding, stride=stride))]
 
@@ -247,10 +250,16 @@ class FlexDiscrim(Discriminator):
         in_channels = self.second_out
         for l in range(num_layers):
             out_channels = next_largest_dividend(int_round(self.growth_rate * in_channels), self.channel_div)
-            layers += conv_layer(in_channels, out_channels, kernel_size=kernel_sizes[l + 1])
+            layers += conv_layer(
+                in_channels, out_channels, kernel_size=kernel_sizes[l + 1],
+                use_spectral_norm=self.spectral_norm and layer_depth == 1
+            )
             extend_layers = sum([
-                conv_layer(out_channels, out_channels, stride=1, cnv_type=self.block_conv_type)
-                for _ in range(layer_depth - 1)
+                conv_layer(
+                    out_channels, out_channels, stride=1,
+                    cnv_type=self.block_conv_type,
+                    use_spectral_norm=self.spectral_norm and (i == layer_depth - 2)
+                ) for i in range(layer_depth - 1)
             ], [])
             layers += [ResConn(extend_layers)] if layer_depth - 1 and self.use_conv_residual else extend_layers
             if self.se_block_gen:
