@@ -47,7 +47,7 @@ class ConvLayer(SerializableModule):
             mid_channels = out_channels
         if filter_gen:
             filter_gen = FILTER_TYPES[filter_gen] if isinstance(filter_gen, str) else filter_gen
-            kwargs["conv_type"] = Lambda(DynamicConv2d, filt_gen=filter_gen)
+            kwargs["conv_type"] = Lambda(DynamicConv2d, filter_gen=filter_gen)
         super().__init__(
             in_channels=in_channels, out_channels=out_channels,
             mid_channels=mid_channels, num_convs=num_convs,
