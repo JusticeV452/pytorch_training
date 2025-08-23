@@ -46,8 +46,8 @@ class SEBlock(SerializableModule):
     reduction_ratio: int = Field(16, description="Reduction ratio for bottleneck")
     inplace: bool = Field(False, description="Whether ReLU modifies input in-place")
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         hidden_size = max(self.in_channels // self.reduction_ratio, 1)
         self.fc = nn.Sequential(
