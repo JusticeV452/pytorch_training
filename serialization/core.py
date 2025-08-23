@@ -6,6 +6,7 @@ import operator as op
 from typing import get_args, get_origin
 from pydantic import BaseModel, ConfigDict, create_model
 from pydantic.fields import FieldInfo
+from pydantic_core import core_schema
 
 from typing import Union, get_args, get_origin
 from utils import write_json, load_json, not_none
@@ -240,6 +241,19 @@ class ParamManager:
     @classmethod
     def _PM_inherit_order(cls):
         return tuple(c for c in cls.__mro__ if issubclass(c, ParamManager))
+
+class PMAutoCaster:
+    @classmethod
+    def _PM_auto_cast(cls, v):
+        raise NotImplementedError
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler):
+
+        def validate(v):
+            return cls._PM_auto_cast(v)
+
+        return core_schema.no_info_plain_validator_function(validate)
 
 
 class SafeEvaluator:
