@@ -211,13 +211,29 @@ class ParamManager:
             if k not in self._exclude_from_dump
         }
 
-    def model_dump(self, *args, explicit=True, **kwargs):
-        dump = {}
-        for k, v in self.param_model_dump(*args, **kwargs).items():
-            dump[k] = (
-                v.model_dump(*args, explicit=explicit, **kwargs)
-                if isinstance(v, ParamManager) else v
-            )
+    @classmethod
+    def model_dump_iterable(cls, iterable, *args, explicit=True, deep=True, **kwargs):
+        is_list_like = isinstance(iterable, list | tuple)
+        result = [] if is_list_like else {}
+        el_iter = enumerate(iterable) if is_list_like else iterable.items()
+        result_updater = (
+            (lambda k, v: result.append(v))
+            if is_list_like else lambda k, v: result.update({k: v})
+        )
+        for k, v in el_iter:
+            dump_v = v
+            if isinstance(v, ParamManager):
+                dump_v = v.model_dump(*args, explicit=explicit, deep=deep, **kwargs)
+            elif deep and isinstance(v, list | tuple | dict):
+                dump_v = cls.model_dump_iterable(v, *args, explicit=explicit, deep=deep, **kwargs)
+            result_updater(k, dump_v)
+        return type(iterable)(result) if is_list_like else result
+
+    def model_dump(self, *args, explicit=True, deep=True, **kwargs):
+        dump = self.model_dump_iterable(
+            self.param_model_dump(*args, **kwargs),
+            *args, explicit=explicit, deep=deep, **kwargs
+        )
         return dump if not explicit else {
             PARAM_MAN_SER_PREFIX: (get_module_name(self.__class__), dump)
         }
