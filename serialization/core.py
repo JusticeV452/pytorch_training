@@ -5,7 +5,7 @@ import operator as op
 
 from typing import get_args, get_origin
 from pydantic import BaseModel, ConfigDict, create_model
-from pydantic.fields import FieldInfo
+from pydantic.fields import FieldInfo, PydanticUndefined
 from pydantic_core import core_schema
 
 from typing import Union, get_args, get_origin
@@ -130,7 +130,7 @@ class ParamManager:
                     cls._field_inheritance.setdefault(parent_name, [])
                     cls._field_inheritance[parent_name].append(name)
                     default = default.default.default
-                elif default.default is not ...:
+                elif default.default not in (PydanticUndefined, ...):
                     default = default.default
                 else:
                     default = ...
