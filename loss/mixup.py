@@ -5,7 +5,7 @@ import torch.nn.functional as F
 def mixup_data(real, fake, alpha=0.4):
     """Applies MixUp to real and fake images"""
     batch_size = real.size(0)
-    lam = torch.distributions.Beta(alpha, alpha).sample((batch_size,)).to(real.device)
+    lam = torch.distributions.Beta(alpha, alpha).sample((batch_size,)).to(real.device, real.dtype)
     lam = lam.view(batch_size, 1, 1, 1)  # Reshape for broadcasting
     mixed = lam * real + (1 - lam) * fake
     return mixed, lam
