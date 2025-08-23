@@ -137,6 +137,7 @@ class Discriminator(SerializableModel):
 
 
 class FlexDiscrim(Discriminator):
+    size: Optional[int] = Field(None, description="Input image size")
     num_layers: int = Field(2, description="Number of convolutional layers in each encoder block")
     start: int = Field(32, description="Number of output channels for first layer")
     second_out: int = Field(128, description="Number of output channels for second layer")
@@ -176,14 +177,14 @@ class FlexDiscrim(Discriminator):
         nn.Conv2d, description="Base convolutional layer type"
     )
     block_conv_type: AutoLambda[nn.Module] = Field(
-        nn.Conv2d, description="Convolution type used in conv blocks"
+        conv_type, description="Convolution type used in conv blocks"
     )
     use_conv_residual: bool = Field(False, description="Whether to use residual connections in conv blocks")
-    cls_kwargs: dict = Field(default_factory=dict, description="Additional kwargs passed to classifier")
-    channel_div: int = Field(1, description="Ensure all channel counts are divisible by this")
+    cls_kwargs: dict = Field({"channel_div": 8}, description="Additional kwargs passed to classifier")
+    channel_div: int = Field(32, description="Ensure all channel counts are divisible by this")
 
-    def __init__(self, size, **kwargs):
-        super().__init__(size=size, **kwargs)
+    def __init__(self, *args, **kwargs):
+        SerializableModel.__init__(self, *args, **kwargs)
         self.dropouts = []
         self.dropouts_enabled = True
 
@@ -194,6 +195,7 @@ class FlexDiscrim(Discriminator):
         num_channels = self.num_channels
         cls_type = self.cls_type
         num_layers = self.num_layers
+        size = self.size
 
         if self.kernel_sizes is None:
             assert kernel_size
@@ -201,6 +203,7 @@ class FlexDiscrim(Discriminator):
         kernel_sizes = self.kernel_sizes
 
         layers = []
+        assert (self.enc_dim_reducer or size) and (size or num_layers)
         num_layers = (
             int(round(math.log(size, 2))) - 5 if num_layers is None
             else num_layers
