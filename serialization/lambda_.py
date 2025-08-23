@@ -14,7 +14,7 @@ from torch import nn
 
 from utils import not_none
 from .core import (
-    PARAM_MAN_SER_PREFIX, ParamManager, SafeEvaluator,
+    PARAM_MAN_SER_PREFIX, PMAutoCaster, ParamManager, SafeEvaluator,
     eval_obj_name, get_module_name, is_serialized_param_man,
     parse_serialized_param_man
 )
@@ -76,7 +76,26 @@ def eval_str(string):
         return globals()[string]
 
 
-class Lambda(ParamManager):
+class SerializableCallable(ParamManager, PMAutoCaster):
+    @classmethod
+    def _PM_auto_cast(cls, v):
+        if is_serialized_param_man(v):
+            _, v = parse_serialized_param_man(v)
+        cast_cls = Lambda if cls is SerializableCallable else cls
+        if isinstance(v, cls):
+            cast_result = v
+        elif callable(v) or isinstance(v, str) or isinstance(v, dict):
+            try:
+                cast_result = cast_cls(**v) if type(v) is dict else cast_cls(v)
+            except Exception as e:
+                raise ValueError(f"Casting '{v}' to {cast_cls.__name__} failed") from e
+        else:
+            raise ValueError(f"Cannot convert {v} to {cast_cls.__name__}")
+
+        return cast_result
+
+
+class Lambda(SerializableCallable):
     # TODO: Remove arg_arity (make arity property base on passed kwargs and func kwargs)
     # TODO: Add limited support for passing literal lambda objects (dill.source.getsource / inspect.getsource)
     # TODO: Change AutoLambda to validate func result type using function annotation (if there enforce, else do nothing)
@@ -225,30 +244,6 @@ class Lambda(ParamManager):
         # TODO: Remove args passed through *args from _base_kwargs before calling ?
         return func(*args, **self._base_kwargs, **kwargs)
 
-    @classmethod
-    def __get_pydantic_core_schema__(cls, source_type, handler: GetCoreSchemaHandler):
-
-        def validate(v):
-            if is_serialized_param_man(v):
-                _, v = parse_serialized_param_man(v)
-            if isinstance(v, cls):
-                lam = v
-            elif callable(v) or isinstance(v, str) or isinstance(v, dict):
-                try:
-                    lam = cls(**v) if type(v) is dict else cls(v)
-                except Exception as e:
-                    raise ValueError(f"Casting '{v}' to {cls.__name__} failed") from e
-            else:
-                raise ValueError(f"Cannot convert {v} to {cls.__name__}")
-
-            return lam
-
-        return core_schema.no_info_plain_validator_function(validate)
-
-    @classmethod
-    def _PM_auto_cast(cls, obj):
-        return cls(obj)
-
 
 class FuncWrapper(Lambda):
     def __init__(self, func):
@@ -283,7 +278,7 @@ class ModuleWrapper(FuncWrapper):
 Args = TypeVar("Args")
 Return = TypeVar("Return")
 
-class AutoLambda(Generic[Args, Return]):
+class AutoLambda(Generic[Args, Return], PMAutoCaster):
     """
     Generic wrapper for Lambdas that auto-casts from string or callable.
     AutoLambda[T] means:
@@ -295,7 +290,7 @@ class AutoLambda(Generic[Args, Return]):
 
     @overload
     def __class_getitem__(cls, item: Return) -> "AutoLambda[Args, Return]": ...
-    
+
     @overload
     def __class_getitem__(cls, item: tuple[Args, Return]) -> "AutoLambda[Args, Return]": ...
 
