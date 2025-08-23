@@ -193,7 +193,7 @@ class FlexUp(SerializableModule):
             get_conv_layer(in_channels, out_channels, mid_channels=conv_mid_channels),
             *[
                 get_conv_layer(out_channels, out_channels)
-                for i in range(self.num_conv_layers - 1)
+                for _ in range(self.num_conv_layers - 1)
             ],
         )
 
@@ -205,15 +205,14 @@ class FlexUp(SerializableModule):
 
         x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
                         diffY // 2, diffY - diffY // 2])
+        # if you have padding issues,
+        # https://github.com/HaiyongJiang/U-Net-Pytorch-Unstructured-Buggy/commit/0e854509c2cea854e247a9c615f175f76fbb2e3a
+        # https://github.com/xiaopeng-liao/Pytorch-UNet/commit/8ebac70e633bac59fc22bb5195e513d5832fb3bd
+        x = torch.cat([x2, x1], dim=1)
         if callable(glue_conv):
             x = glue_conv(x)
-        checkpoints = len(self.conv)
-        use_checkpointing = self.use_checkpointing and checkpoints > 0
-        conv = (
-            (lambda inp: checkpoint_sequential(self.conv, checkpoints, inp))
-            if use_checkpointing else self.conv
-        )
-        return conv(x)
+        checkpoints = len(self.conv) if self.use_checkpointing else 0
+        return self.checkpoint_sequential_run(self.conv, checkpoints, x)
 
 
 class OutConv(SerializableModule):
@@ -458,11 +457,13 @@ class MultiInpFlexUNet(SerializableModel):
                 down_idx = len(down_channels_outs) - i - 2
                 glue_in = down_channels_outs[down_idx] + expected_up_outs[i + 1]
                 glue_out = expected_up_outs[i]
+                glue_conv = None
                 if glue_in != glue_out:
-                    glue_conv = OutConv(glue_in, glue_out, kernel_size=glue_kernel_size)                    
-                    self.glue_convs.append(expand_glue_conv(glue_conv, glue_out))
-                else:
-                    self.glue_convs.append(None)
+                    glue_conv = expand_glue_conv(
+                        OutConv(glue_in, glue_out, kernel_size=glue_kernel_size),
+                        glue_out
+                    )
+                self.glue_convs.append(glue_conv)
             enc_in = down_channels_outs[-1]
             enc_out = expected_up_outs[0]
             if enc_in != enc_out:
