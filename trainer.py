@@ -193,7 +193,7 @@ class ModelTrainer(ParamManager):
         optim_params = self.model.parameters()
         if self.trainable_loss:
             optim_params = list(optim_params) + list(self.loss_func.parameters())
-        
+
         optimizer = optim_type(
             optim_params, lr=0.01 if learn_rate is None else learn_rate,
             eps=1e-4 if self.dtype == torch.float16 else 1e-8
@@ -219,7 +219,7 @@ class ModelTrainer(ParamManager):
         gc.collect()
         torch.cuda.empty_cache()
         return optimizer
-        
+
     def load_model(self, model_type, model_kwargs, save_folder=None):
         resume_from = self.get("resume_from", self.get_env_param("resume_from"))
         model = model_type if model_kwargs is None else model_type(
@@ -618,7 +618,7 @@ class TrainingEnv(ParamManager):
         start_time = datetime.now()
         self.world_size = world_size
         self.gpu_id = rank
-        
+
         try:
             save_folder = self.save_folder
             name = self.name
@@ -665,8 +665,10 @@ class TrainingEnv(ParamManager):
             [trainer.on_training_end() for trainer in self.trainers]
             self.save_params(start_time)
         return self.trainers
+
     def get_loss_name(self, name, trainer=None):
         return f"{trainer.name + '_' if trainer.name else ''}{name}"
+
     def run_batch(self, idx, overall_epoch, batch):
         images = self.preprocess(batch)
         # defs
@@ -780,7 +782,7 @@ class GANTrainingEnv(TrainingEnv):
         if self.empty_cache_post_step:
             gc.collect()
             torch.cuda.empty_cache()
-        
+
         with torch.amp.autocast("cuda", enabled=use_amp):
             self.discrim.eval()
             discrim_loss = self.discrim.calc_loss(real, fake, calc_metrics=True)
@@ -902,12 +904,14 @@ class DiscrimTrainer(ModelTrainer):
                 isinstance(self.mixup_loss_ratio, int | float)
                 and 0 <= self.mixup_loss_ratio <= 1
             ):
-                loss *= (1 - self.mixup_loss_ratio) * loss
+                loss *= (1 - self.mixup_loss_ratio)
                 mixup_loss *= self.mixup_loss_ratio
             loss += mixup_loss
+
         self.batch_state.update({"enc": enc})
         if calc_metrics:
             self.update_loss_components(self.calc_metrics(images, recon_x))
+
         return loss
 
     def calc_loss_modifier(self):
