@@ -11,6 +11,7 @@ from typing import Union, get_args, get_origin
 from utils import write_json, load_json, not_none
 
 PARAM_MAN_SER_PREFIX = "_ParamManager"
+DEBUG = False
 
 
 def is_serialized_param_man(val) -> bool:
@@ -114,7 +115,8 @@ class ParamManager:
         for name, typ in annotations.items():
             default = defaults.get(name, ...)
             field_to_name[default] = name
-            print("field_name:", name)
+            if DEBUG:
+                print("field_name:", name)
 
             if isinstance(default, FieldInfo):
                 if default.exclude:
@@ -140,7 +142,8 @@ class ParamManager:
                     and (is_generic_type(typ) or not isinstance(default, auto_caster))
                 ):
                     try:
-                        print(f"Wrapping '{default}' using {auto_caster}")
+                        if DEBUG:
+                            print(f"Wrapping '{default}' using {auto_caster}")
                         # default = getattr(auto_caster, "_PM_auto_cast", auto_caster)(default)
                         default = auto_caster._PM_auto_cast(default)
                     except Exception as e:
