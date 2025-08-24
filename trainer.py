@@ -158,8 +158,8 @@ class ModelTrainer(DeviceContainer):
     def log(self, *args, **kwargs):
         if self.disable_logging:
             return
-        return print(f"{self.name}:", *args, **kwargs)
-    
+        return print(f"{self.name if self.name else 'trainer'}:", *args, **kwargs)
+
     def get_env_param(self, param_name, default_val=None):
         if not self._env or not hasattr(self.env, param_name):
             return default_val
@@ -207,7 +207,7 @@ class ModelTrainer(DeviceContainer):
                 optimizer.load_state_dict(optim_state)
                 for g in optimizer.param_groups:
                     if learn_rate is not None:
-                        g['lr'] = learn_rate
+                        g["lr"] = learn_rate
                 del optim_state
             except FileNotFoundError:
                 self.log("optimizer loading failed, using new optimizers.")
