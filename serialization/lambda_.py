@@ -4,6 +4,7 @@ import inspect
 import json
 import re
 
+from inspect import Parameter
 from typing import (
     Any, Callable, Dict, Generic, Optional, Sequence, Type, TypeVar, Union,
     get_args, get_origin, get_type_hints, overload
@@ -74,6 +75,13 @@ def eval_str(string):
         return ast.literal_eval(string)
     except:
         return globals()[string]
+    
+
+def get_named_params(param_iter):
+    return [
+        param for param in param_iter
+        if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
+    ]
 
 
 class SerializableCallable(ParamManager, PMAutoCaster):
@@ -318,11 +326,23 @@ class AutoLambda(Generic[Args, Return], PMAutoCaster):
             func = None
             if expected_args_typ or expected_return:
                 func = lam.get_func()
+                # Quick fix for Module not found on load from json
+                globalns = getattr(func, "__globals__", {}).copy() if hasattr(func, "__globals__") else {}
+                globalns.setdefault("Module", nn.Module)
+                try:
+                    hints = get_type_hints(func, globalns=globalns)
+                except NameError:
+                    # TODO: Fix name error for some objects on load from json? (Module, OrderedDict, ...)
+                    hints = {}
 
             if expected_args_typ and not lam.ignore_args_:
                 sig_params = inspect.signature(func).parameters.values()
+                num_args_accepted = (
+                    -1 if Parameter.VAR_POSITIONAL in [param.kind for param in sig_params]
+                    else len(get_named_params(sig_params))
+                )
                 expected_args = get_args(expected_args_typ)
-                if len(sig_params) != len(expected_args):
+                if num_args_accepted != -1 and num_args_accepted < len(expected_args):
                     raise TypeError(
                         f"{func} takes {len(sig_params)} args, "
                         f"but {len(expected_args)} expected"
@@ -337,7 +357,6 @@ class AutoLambda(Generic[Args, Return], PMAutoCaster):
                     )
             if expected_return:
                 # Use func annotation for return type checking
-                hints = get_type_hints(func)
                 return_type = hints.get("return", None)
                 if return_type and return_type != expected_return:
                     raise TypeError(
