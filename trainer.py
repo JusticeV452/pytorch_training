@@ -548,10 +548,11 @@ class TrainingEnv(ParamManager):
 
     def init_save_folder(self):
         save_folder = self.save_folder
-        self.save_dir = f"{save_folder}/losses/"
+        self.loss_dir = f"{save_folder}/losses/"
+        self.loss_path = f"{self.loss_dir}_{self.get_name(suffix='_')}loss.json"
         self.weights_dir = f"{save_folder}/weights/"
         self.run_history_dir = f"{save_folder}/run_args/"
-        os.makedirs(self.save_dir, exist_ok=True)
+        os.makedirs(self.loss_dir, exist_ok=True)
         os.makedirs(self.weights_dir, exist_ok=True)
         os.makedirs(self.run_history_dir, exist_ok=True)
 
@@ -658,7 +659,7 @@ class TrainingEnv(ParamManager):
                 ))
                 if (epoch + 1) % self.save_rate == 0:
                     self.save(overall_epoch)
-                self.loss_man.update_path(f"{save_folder}/losses/_{name}_loss.json", epoch=overall_epoch)
+                self.loss_man.update_path(self.loss_path, epoch=overall_epoch)
 
                 if self.empty_cache_post_epoch:
                     gc.collect()
