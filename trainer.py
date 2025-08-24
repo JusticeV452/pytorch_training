@@ -632,14 +632,15 @@ class TrainingEnv(ParamManager):
         # TODO: Implement
         return loss, indivs
 
+    def stop(self):
+        self._stop = True
+
     def run(self, rank=0, world_size=1):
         start_time = datetime.now()
         self.world_size = world_size
         self.gpu_id = rank
 
         try:
-            save_folder = self.save_folder
-            name = self.name
             self.dataloader = dataloader = self.get_dataloader()
             self.train_iterator = tqdm.tqdm(range(self.epochs), position=0, leave=True)
             if self.init_save and self.resume_from == 0:
@@ -647,9 +648,11 @@ class TrainingEnv(ParamManager):
 
             [trainer.zero_grad() for trainer in self.trainers]
             for epoch in self.train_iterator:
-                
+                overall_epoch = epoch + self.resume_from
+
+                loss_dict = None
+                batch_complete = False
                 for idx, batch in enumerate(dataloader):
-                    overall_epoch = epoch + self.resume_from
                     loss_dict = self.run_batch(idx, overall_epoch, batch)
 
                     report_str, loss_dict = self.get_progress_report(idx, overall_epoch, loss_dict)
@@ -658,25 +661,34 @@ class TrainingEnv(ParamManager):
 
                     if self.external_updater:
                         self.external_updater.update(self, epoch, idx, len(dataloader))
+
+                    if idx == len(dataloader) - 1:
+                        self.update_progress_bar(self.get_progress_report(
+                            len(dataloader), overall_epoch, loss_dict
+                        )[0])
+                        batch_complete = True
+
                     [trainer.on_batch_end() for trainer in self.trainers]
                     if self.empty_cache_post_batch:
                         gc.collect()
                         torch.cuda.empty_cache()
+                    if self._stop:
+                        break
 
                 [trainer.on_epoch_end() for trainer in self.trainers]
 
-                self.update_progress_bar(self.get_progress_report(
-                    len(dataloader), overall_epoch
-                ))
-                if (epoch + 1) % self.save_rate == 0:
-                    self.save(overall_epoch)
-                self.loss_man.update_path(self.loss_path, epoch=overall_epoch)
+                if batch_complete:
+                    if (epoch + 1) % self.save_rate == 0:
+                        self.save(overall_epoch)
+                    self.loss_man.update_path(self.loss_path, epoch=overall_epoch)
 
                 if self.empty_cache_post_epoch:
                     gc.collect()
                     torch.cuda.empty_cache()
-
-            self.save(overall_epoch)
+                if self._stop:
+                    break
+            if not self._stop:
+                self.save(overall_epoch)
         except Exception as e:
             raise e
         finally:
