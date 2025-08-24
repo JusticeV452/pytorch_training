@@ -1,11 +1,10 @@
+import warnings
 import torch
 
-from typing import Optional
 from pydantic import Field
-from pydantic_core import core_schema
 from torch.utils.checkpoint import checkpoint_sequential
 
-from .core import ParamManager
+from .core import PMAutoCaster, ParamManager
 from .lambda_ import ModuleWrapper, SerializableCallable
 
 
@@ -20,28 +19,35 @@ class SerializableModule(torch.nn.Module, SerializableCallable):
         return func(inp)
 
 
-class TorchDevice:
+class TorchDevice(PMAutoCaster):
     @classmethod
-    def __get_pydantic_core_schema__(cls, *_):
+    def _PM_auto_cast(cls, v):
+        cast_result = v
+        if type(v) is str:
+            cuda_available = torch.cuda.is_available()
+            if "cuda" in v and not cuda_available:
+                warnings.warn("Cuda is not available, falling back to cpu")
+            cast_result = torch.device(v if cuda_available else "cpu")
 
-        def validate(v):
-            if not isinstance(v, torch.device):
-                raise ValueError(f"{v} is not a torch device")
-            return v
+        if not isinstance(cast_result, torch.device):
+           raise ValueError(f"Cannot convert {v} to torch device")
 
-        return core_schema.no_info_plain_validator_function(validate)
-    
+        return cast_result
 
-class TorchDType:
+
+class TorchDType(PMAutoCaster):
     @classmethod
-    def __get_pydantic_core_schema__(cls, *_):
+    def _PM_auto_cast(cls, v):
+        cast_result = v
+        if type(v) is str:
+            if '.' in v:
+                _, v = v.split('.', 1)
+            cast_result = getattr(torch, v)
 
-        def validate(v):
-            if not isinstance(v, torch.dtype):
-                raise ValueError(f"{v} is not a torch dtype")
-            return v
+        if not isinstance(cast_result, torch.dtype):
+           raise ValueError(f"Cannot convert {v} to torch dtype")
 
-        return core_schema.no_info_plain_validator_function(validate)
+        return cast_result
 
 
 class DeviceContainer(ParamManager):
