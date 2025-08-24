@@ -164,9 +164,9 @@ class ModelTrainer(ParamManager):
         return print(f"{self.name}:", *args, **kwargs)
     
     def get_env_param(self, param_name, default_val=None):
-        if not self._env or param_name not in self.env.params:
+        if not self._env or not hasattr(self.env, param_name):
             return default_val
-        return self.env.params[param_name]
+        return getattr(self.env, param_name)
 
     def set_env(self, env):
         assert isinstance(env, TrainingEnv), f"{self.name}: {env} must be an instance of TrainingEnv."
