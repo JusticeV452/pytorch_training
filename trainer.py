@@ -121,10 +121,6 @@ class ModelTrainer(DeviceContainer):
         self._env = None
         self.set_env(env)
         self.batch_state = {}
-        self.device = torch.device(
-            self.params.device_str if ("cuda" in self.params.device_str and torch.cuda.is_available())
-            else "cpu"
-        )
         self.log("loading model...")
         self.model = self.load_model(self.model_type, self.model_kwargs)
     
