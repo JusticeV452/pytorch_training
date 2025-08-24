@@ -25,7 +25,8 @@ from loss.mixup import mixup_data, mixup_bce
 from pruning import FineGrainedPruner, DummyPruner
 from utils import calc_model_size, count_parameters, percent_chance, not_none, shuffle_tensor
 from sampling import RandResBatchSampler
-from serialization import ParamManager, Lambda, AutoLambda
+from serialization import AutoLambda, Lambda, ParamManager, SerializableCallable
+from serialization.nn import DeviceContainer, TorchDType, TorchDevice
 
 # Flag
 use_multiprocess = True
@@ -72,21 +73,21 @@ class DataParallel(nn.DataParallel):
             return getattr(self.model, attr)
 
 
-class ModelTrainer(ParamManager):
+class ModelTrainer(DeviceContainer):
+    loss_func: SerializableCallable = Field(..., description="Loss function")
     name: Optional[str] = Field(None, description="Optional name for the trainer")
     model_type: Type[torch.nn.Module] = Field(..., description="Model Class")
     model_kwargs: Optional[dict] = Field(None, description="Model kwargs")
     learn_rate: float = Field(1e-3, description="Learning rate for optimizer")
     resume_from: Optional[int] = Field(None, description="Epoch to resume from")
-    device_str: str = Field("cuda", description="Device to run training on ('cpu' or 'cuda')")
     optim_type: Type[torch.optim.Optimizer] = Field(
         torch.optim.Adam,
         description="Optimizer class to use"
     )
     use_checkpointing: bool = Field(False, description="Enable checkpointing")
     grad_acc_size: int = Field(1, description="Gradient accumulation steps")
-    dtype: torch.dtype = Field(torch.float32, description="Data type for tensors")
-    loss_func: AutoLambda = Field(..., description="Loss function")
+    device: TorchDevice = Field("cuda", description="Device to run training on ('cpu' or 'cuda')")
+    dtype: TorchDType = Field(torch.float32, description="Data type for tensors")
     reg_func: AutoLambda[Tuple[torch.nn.Module], float] = Field(
         default=Lambda("lambda model: 0"),
         description="Regularization function"

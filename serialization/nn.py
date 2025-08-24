@@ -5,7 +5,8 @@ from pydantic import Field
 from pydantic_core import core_schema
 from torch.utils.checkpoint import checkpoint_sequential
 
-from .lambda_ import SerializableCallable
+from .core import ParamManager
+from .lambda_ import ModuleWrapper, SerializableCallable
 
 
 class SerializableModule(torch.nn.Module, SerializableCallable):
@@ -43,14 +44,23 @@ class TorchDType:
         return core_schema.no_info_plain_validator_function(validate)
 
 
-class SerializableModel(SerializableModule):
-    device: Optional[str | TorchDevice] = Field("cpu", exclude=True, description="Device to initialize on")
+class DeviceContainer(ParamManager):
+    device: TorchDevice = Field("cpu", description="Device to initialize on")
+    dtype: TorchDType = Field(torch.float32, description="Data type to use for model parameters")
+
+    def param_model_dump(self, *args, **kwargs):
+        dump = super().param_model_dump(*args, **kwargs)
+        dump["device"] = str(dump["device"])
+        dump["dtype"] = str(dump["dtype"])
+        return dump
+
+
+class SerializableModel(SerializableModule, DeviceContainer):
+    device: TorchDevice = Field("cpu", exclude=True, description="Device to initialize on")
     dtype: TorchDType = Field(torch.float32, exclude=True, description="Data type to use for model parameters")
 
-    def __init__(self, **kwargs):
-        if not kwargs.get("device"):
-            kwargs["device"] = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        super().__init__(**kwargs)
+    def param_model_dump(self, *args, **kwargs):
+        return SerializableModule.param_model_dump(self, *args, **kwargs)
 
     def to(self, *args, **kwargs):
         device, dtype, *_, = torch._C._nn._parse_to(*args, **kwargs)
