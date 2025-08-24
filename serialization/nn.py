@@ -3,15 +3,20 @@ import torch
 from typing import Optional
 from pydantic import Field
 from pydantic_core import core_schema
+from torch.utils.checkpoint import checkpoint_sequential
 
-from .core import ParamManager
-from .lambda_ import ModuleWrapper
+from .lambda_ import SerializableCallable
 
 
-class SerializableModule(torch.nn.Module, ParamManager):
-    def __init__(self, **kwargs):
+class SerializableModule(torch.nn.Module, SerializableCallable):
+    def __init__(self, *args, **kwargs):
         torch.nn.Module.__init__(self)
-        ParamManager.__init__(self, **kwargs)
+        SerializableCallable.__init__(self, *args, **kwargs)
+
+    def checkpoint_sequential_run(self, func, num_checkpoints, inp):
+        if num_checkpoints:
+            return checkpoint_sequential(func, num_checkpoints, inp)
+        return func(inp)
 
 
 class TorchDevice:
@@ -61,12 +66,6 @@ class SerializableModel(SerializableModule):
                 use_reentrant=use_reentrant
             )
         return layer(*args)
-
-    def checkpoint_sequential_run(self, func, num_checkpoints, inp):
-        if num_checkpoints:
-            return checkpoint_sequential(func, num_checkpoints, inp)
-        return func(inp)
-
 
 
 def __getattr__(name):
