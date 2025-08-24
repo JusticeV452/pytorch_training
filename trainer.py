@@ -443,19 +443,30 @@ class ModelTrainer(DeviceContainer):
         self.prune()
         return did_step
 
-    def update_loss_components(self, loss_name, loss_val=None):
-        if self.model.training:
+    def update_batch_state(self, state_key, name, val=None, force_update=False):
+        if not force_update and self.model.training:
             return
-        assert (isinstance(loss_name, str) and not_none(loss_val)) or isinstance(loss_name, dict)
-        if isinstance(loss_name, dict):
-            self.last_loss_components.update(loss_name)
+        assert (isinstance(name, str) and not_none(val)) or isinstance(name, dict)
+        if state_key not in self.batch_state:
+            self.batch_state[state_key] = {}
+        if isinstance(name, dict):
+            self.batch_state[state_key].update(name)
             return
-        self.last_loss_components[loss_name] = loss_val
+        self.batch_state[state_key][name] = val
+
+    def update_loss_components(self, loss_name, loss_val=None, force_update=False):
+        self.update_batch_state(StateKeys.LOSS_COMPS, loss_name, loss_val, force_update)
+
+    def update_metrics(self, metric_name, metric_val=None):
+        self.update_batch_state(StateKeys.METRICS, metric_name, metric_val, force_update=True)
 
     def call_loss_func(self, *args, **kwargs):
         result = self.loss_func(*args, **kwargs)
-        if (is_list_like := isinstance(result, list | tuple)) and len(result) >= 2 and not self.model.training:
-            self.update_loss_components(result[1])
+        if (is_list_like := isinstance(result, list | tuple)) and not self.model.training:
+            if len(result) >= 3:
+                self.update_metrics(result[2])
+            elif len(result) >= 2:
+                self.update_loss_components(result[1])
         return result[0] if is_list_like else result
 
     def status_update(self, images, expected, pred, epoch, batch_num=None):
@@ -921,7 +932,7 @@ class DiscrimTrainer(ModelTrainer):
 
         self.batch_state.update({"enc": enc})
         if calc_metrics:
-            self.update_loss_components(self.calc_metrics(images, recon_x))
+            self.update_metrics(self.calc_metrics(images, recon_x))
 
         return loss
 
