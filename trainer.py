@@ -501,7 +501,10 @@ class TrainingEnv(ParamManager):
     empty_cache_post_epoch: bool = Field(False, description="Empty cache after each epoch")
     empty_cache_post_batch: bool = Field(False, description="Empty cache after each batch")
     reset_rng: Optional[Any] = Field(None, description="RNG reset configuration")
-    save_manager: Optional[Any] = Field(None, description="Manager for save operations")
+    save_manager: Optional[Any] = Field(None, exclude=True, description="Manager for save operations")
+    size_limit_GB: Optional[float] = Field(
+        None, description="Max size of weights to keep; uses KeepIntermediateManager; ignored if save_manager specified"
+    )
     external_updater: Optional[Any] = Field(None, description="External updater object")
     show_batch_progress: bool = Field(True, description="Show progress bar for batches")
     show_num_unique: bool = Field(False, description="Show number of unique items in batches")
@@ -517,6 +520,12 @@ class TrainingEnv(ParamManager):
             name if name is not None else ''
         )
         self.init_save_folder()
+        if not_none(self.size_limit_GB) and self.save_manager is None:
+            self.save_manager = KeepIntermediateManager(
+                self.save_folder,
+                self.size_limit_GB * (2 ** 30),
+                save_rate=self.save_rate
+            )
         print("creating dataset...")
         self.dataset = self.dataset_type(**self.dataset_kwargs,)
         print("dataset finished.")
