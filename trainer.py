@@ -186,7 +186,7 @@ class ModelTrainer(DeviceContainer):
     def load_optimizer(self, save_folder=None):
         learn_rate = self.learn_rate
         optim_type = self.optim_type
-        resume_from = self.get("resume_from", self.get_env_param("resume_from"))
+        resume_from = self.resume_from or self.get_env_param("resume_from")
         optim_params = self.model.parameters()
         if self.trainable_loss:
             optim_params = list(optim_params) + list(self.loss_func.parameters())
@@ -218,7 +218,7 @@ class ModelTrainer(DeviceContainer):
         return optimizer
 
     def load_model(self, model_type, model_kwargs, save_folder=None):
-        resume_from = self.get("resume_from", self.get_env_param("resume_from"))
+        resume_from = self.resume_from or self.get_env_param("resume_from")
         model = model_type if model_kwargs is None else model_type(
             **model_kwargs, device=self.device
         )
@@ -255,7 +255,7 @@ class ModelTrainer(DeviceContainer):
         return model.to(device=self.device, dtype=self.dtype)
 
     def load_loss_weights(self, save_folder=None):
-        resume_from = self.get("resume_from", self.get_env_param("resume_from"))
+        resume_from = self.resume_from or self.get_env_param("resume_from")
         if not self.resume_from:
             return
         weights_dir = (
