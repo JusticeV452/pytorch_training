@@ -74,13 +74,13 @@ class DataParallel(nn.DataParallel):
 
 
 class ModelTrainer(DeviceContainer):
+    model_type: Union[Type[torch.nn.Module], torch.nn.Module] = Field(..., description="Model Class")
     loss_func: SerializableCallable = Field(..., description="Loss function")
     name: Optional[str] = Field(None, description="Optional name for the trainer")
-    model_type: Type[torch.nn.Module] = Field(..., description="Model Class")
     model_kwargs: Optional[dict] = Field(None, description="Model kwargs")
-    learn_rate: float = Field(1e-3, description="Learning rate for optimizer")
+    learn_rate: Optional[float] = Field(1e-3, description="Learning rate for optimizer")
     resume_from: Optional[int] = Field(None, description="Epoch to resume from")
-    optim_type: Type[torch.optim.Optimizer] = Field(
+    optim_type: AutoLambda[torch.optim.Optimizer] = Field(
         torch.optim.Adam,
         description="Optimizer class to use"
     )
@@ -310,7 +310,7 @@ class ModelTrainer(DeviceContainer):
             self.env.weights_dir if save_folder is None else f"{save_folder}/weights"
         ).rstrip('/')
         base_path = f"{weights_dir}/{epoch + 1}_{self.full_name()}"
-        for save_type, save_obj in enumerate([("", self.model), ("_optim", self.optimizer)]):
+        for save_type, save_obj in [("", self.model), ("_optim", self.optimizer)]:
             if save_error := self.safe_save_weights(save_obj, f"{base_path}{save_type}.torch", bool(save_type)):
                 raise Exception(f"Failed to save {'optimizer' if save_type else 'model'} weights") from save_error
         if self.trainable_loss:
