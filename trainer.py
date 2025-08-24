@@ -148,7 +148,7 @@ class ModelTrainer(ParamManager):
                 num_accumulation_steps=self.grad_acc_size
             )
 
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.get_env_param("use_emp", False))
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.get_env_param("use_amp", False))
         self.diversity_loss_man = DummyFDL()
         if self.diversity_loss_func:
             div_func = self.diversity_loss_func
