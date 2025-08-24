@@ -454,9 +454,9 @@ class ModelTrainer(DeviceContainer):
 
     def call_loss_func(self, *args, **kwargs):
         result = self.loss_func(*args, **kwargs)
-        if len(result) >= 2 and not self.model.training:
+        if (is_list_like := isinstance(result, list | tuple)) and len(result) >= 2 and not self.model.training:
             self.update_loss_components(result[1])
-        return result[0]
+        return result[0] if is_list_like else result
 
     def status_update(self, images, expected, pred, epoch, batch_num=None):
         size = images.shape[-2:]
