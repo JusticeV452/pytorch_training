@@ -853,7 +853,7 @@ class DiscrimTrainer(ModelTrainer):
     label_flip_prob: float = Field(0.0, description="Probability of flipping labels (for data augmentation)")
     positive_label: float = Field(1.0, description="Label value for positive class")
     negative_label: float = Field(0.0, description="Label value for negative class")
-    add_noise: bool = Field(False, description="Whether to add noise to inputs")
+    use_noise: bool = Field(False, description="Whether to add noise to inputs")
     mixup_alpha: Optional[float] = Field(0.4, description="Alpha parameter for mixup augmentation")
     mixup_samples: Optional[float] = Field(None, description="Ratio of images to use for mixup loss")
     mixup_loss_ratio: Optional[float] = Field(None, description="Loss weighting for mixup")
