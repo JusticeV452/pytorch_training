@@ -810,7 +810,7 @@ class GANTrainingEnv(TrainingEnv):
         if self.empty_cache_pre_step:
             gc.collect()
             torch.cuda.empty_cache()
-        self.gen.loss_step(loss)
+        self.gen.loss_step(idx, loss)
         if self.empty_cache_post_step:
             gc.collect()
             torch.cuda.empty_cache()
