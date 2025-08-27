@@ -120,11 +120,12 @@ class ConvLayer(SerializableModule):
         return result + inp
 
     def forward(self, x):
-        convs = (
-            (lambda inp: checkpoint_sequential(self.convs, self.num_convs - 1, inp))
-            if self.use_checkpointing and self.num_convs > 1 else self.convs
+        num_checkpoints = (
+            self.num_convs - 1
+            if self.use_checkpointing and self.num_convs > 1
+            else 0
         )
-        result = convs(x)
+        result = self.checkpoint_sequential_run(self.convs, num_checkpoints, x)
         if type(self.residual_transform) is not type(None):
             result = self.residual_transform(result, x)
         return result
