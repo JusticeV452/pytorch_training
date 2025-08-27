@@ -13,9 +13,9 @@ class SerializableModule(torch.nn.Module, SerializableCallable):
         torch.nn.Module.__init__(self)
         SerializableCallable.__init__(self, *args, **kwargs)
 
-    def checkpoint_sequential_run(self, func, num_checkpoints, inp):
+    def checkpoint_sequential_run(self, func, num_checkpoints, inp, use_reentrant=False):
         if num_checkpoints:
-            return checkpoint_sequential(func, num_checkpoints, inp)
+            return checkpoint_sequential(func, num_checkpoints, inp, use_reentrant=use_reentrant)
         return func(inp)
 
 

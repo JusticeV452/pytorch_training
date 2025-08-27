@@ -325,10 +325,8 @@ class FlexDiscrim(Discriminator):
             enc_inp = x[:, i * num_classes: (i + 1) * num_classes]
             enc = self.encode(enc_inp)
             encs.append(enc)
-        classify = (
-            (lambda inp: checkpoint_sequential(self.classifier, self.num_classifier_checkpoints, inp))
-            if self.num_classifier_checkpoints else self.classifier
+        out = self.checkpoint_sequential_run(
+            self.classifier, self.num_classifier_checkpoints, torch.cat(encs, axis=1)
         )
-        out = classify(torch.cat(encs, axis=1))
-        return out, enc
+        return out, encs[0] if len(encs) == 1 else encs
 

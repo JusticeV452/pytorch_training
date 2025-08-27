@@ -114,9 +114,8 @@ class FlexDown(SerializableModule):
         )
 
     def forward(self, x):
-        if self.use_checkpointing and len(self.maxpool_conv) > 2:
-            return checkpoint_sequential(self.maxpool_conv, len(self.maxpool_conv) - 2, x)
-        return self.maxpool_conv(x)
+        num_checkpoints = max(len(self.maxpool_conv) - 2, 0) if self.use_checkpointing else 0
+        return self.checkpoint_sequential_run(self.maxpool_conv, num_checkpoints, x)
 
 
 class FlexUp(SerializableModule):
@@ -251,13 +250,10 @@ class OutConv(SerializableModule):
         )
 
     def forward(self, x):
-        checkpoints = self.depth - 1
-        use_checkpointing = self.use_checkpointing and checkpoints > 0
-        pre_out = (
-            (lambda inp: checkpoint_sequential(self.pre_out, checkpoints, inp))
-            if use_checkpointing else self.pre_out
-        )
-        return self.conv(pre_out(x))
+        num_checkpoints = max(self.depth - 1, 0) if self.use_checkpointing else 0
+        return self.conv(self.checkpoint_sequential_run(
+            self.pre_out, num_checkpoints, x
+        ))
 
 
 class UNetDown(SerializableModel):
